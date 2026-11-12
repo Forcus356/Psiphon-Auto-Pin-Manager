@@ -1,7 +1,8 @@
 
 #!/usr/bin/env bash
-# Forcus Psiphon Auto-Pin Manager
+# Forcus Psiphon Auto-Pin Manager v3.1
 # Ubuntu/Debian x86_64
+#Write by https://github.com/Forcus356
 set -Eeuo pipefail
 
 trap 'echo "[ERROR] line $LINENO. Check journalctl -u psiphon-autopin.service -n 80" >&2' ERR
@@ -138,7 +139,9 @@ config.update({
     'LocalHttpProxyPort': 40001,
     'LocalHttpProxyListenAddress': '127.0.0.1',
     'TunnelPoolSize': 1,
-    'EmitDiagnosticNotices': True
+    'EmitDiagnosticNotices': True,
+    'DisableReplay': True,
+    'ReplayCandidateCount': 0
 })
 
 with open(path, 'w') as f:
@@ -274,6 +277,38 @@ PYMERGE
 else
     echo '[OK] Existing SOCKS5 tunnel is responding.'
 fi
+
+# Synchronize selected region without restarting a healthy tunnel.
+python3 - "$CONF/psiphon.config" "$REGION" <<'PYREGION'
+import json
+import os
+import sys
+import shutil
+from datetime import datetime
+
+path, region = sys.argv[1:]
+
+with open(path) as f:
+    config = json.load(f)
+
+if config.get("EgressRegion", "") != region:
+    shutil.copy2(
+        path,
+        path + ".backup-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    )
+    config["EgressRegion"] = region
+    config.pop("TargetServerEntry", None)
+    state = "/var/lib/psiphon-autopin/state.json"
+
+    if os.path.exists(state):
+        os.remove(state)
+
+    with open(path, "w") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+
+    print("[INFO] Region updated; pending next Psiphon restart")
+PYREGION
 
 # Install Google region detector.
 if [[ ! -s "$APP/ipregion.sh" ]]; then
@@ -579,18 +614,22 @@ def server_entry(diagnostic, region):
 
 
 def restart(wait_seconds):
-    run(['docker', 'restart', CONTAINER], timeout=90)
+    run(["docker", "restart", CONTAINER], timeout=90)
 
     deadline = time.monotonic() + wait_seconds
+    last_error = None
 
     while time.monotonic() < deadline:
         try:
-            return get_ip()
-        except Exception:
+            ip = get_ip()
+            log(f"Psiphon ready: exit={ip}")
+            return ip
+        except Exception as error:
+            last_error = error
             time.sleep(2)
 
     raise RuntimeError(
-        f'Psiphon not ready after {wait_seconds}s'
+        f"Psiphon not ready after {wait_seconds}s: {last_error}"
     )
 
 
@@ -657,98 +696,223 @@ def pin_current(ip, geo, region, wait_seconds):
         raise
 
 
+def prepare_rotation(region):
+    """
+    Prepare Psiphon for selecting another server.
+
+    Disable replay preference, remove an existing pin,
+    and preserve the server datastore.
+    """
+
+    config = read_json(CONFIG)
+
+    if not isinstance(config, dict):
+        raise RuntimeError(
+            "Cannot prepare rotation: invalid configuration"
+        )
+
+    changes = {
+        "DisableReplay": True,
+        "ReplayCandidateCount": 0,
+        "TargetServerEntry": "",
+        "DisableTactics": False,
+        "EgressRegion": region,
+        "InitialLimitTunnelProtocols": [],
+        "InitialLimitTunnelProtocolsCandidateCount": 0
+    }
+
+    changed = {
+        key: value
+        for key, value in changes.items()
+        if config.get(key) != value
+    }
+
+    if changed:
+        update_config(changed)
+        log(
+            "Rotation prepared: "
+            "replay preference disabled; "
+            "previous target released"
+        )
+    else:
+        log("Rotation settings already active")
+
+    return bool(changed)
+
+
+
 def search(region, wait, delay, rotate_first=False):
+    """
+    Search indefinitely for a non-RU Google exit.
+
+    Keep the Psiphon datastore intact, disable replay
+    preferences and verify pinned connections.
+    """
+
     log(
-        f'Search indefinitely for region={region or "AUTO"}'
+        f"Search started: region={region or 'AUTO'}, "
+        "attempt limit=UNLIMITED"
     )
 
-    cfg = read_json(CONFIG)
+    config = read_json(CONFIG)
 
-    if not isinstance(cfg, dict):
-        raise RuntimeError('Psiphon config missing or invalid')
+    if not isinstance(config, dict):
+        raise RuntimeError("Psiphon config missing or invalid")
 
-    seen = set()
-    count = 0
-    same = 0
-    last = None
-    needs_restart = rotate_first
+    # Check the current connection before modifying anything.
+    # This avoids disrupting a healthy existing tunnel.
+    try:
+        current_ip, current_geo = probe()
+
+        if current_geo != "RU":
+            log(
+                f"Existing exit is acceptable: "
+                f"{current_ip} Google={current_geo}"
+            )
+
+            try:
+                pin_current(
+                    current_ip,
+                    current_geo,
+                    region,
+                    wait
+                )
+                return True
+            except Exception as error:
+                log(
+                    f"Existing exit pin failed: {error}"
+                )
+    except Exception as error:
+        log(f"Initial connection check failed: {error}")
+
+    # Only prepare rotation if the existing connection
+    # is unacceptable or pinning failed.
+    prepare_rotation(region)
+
+    seen = {}
+    last_ip = None
+    same_streak = 0
+    attempt = 0
+
+    # The updated configuration requires a restart.
+    needs_restart = True
 
     while True:
-        count += 1
+        attempt += 1
+
+        log(f"Attempt {attempt}: rotating Psiphon")
 
         if needs_restart:
-            log(f'Attempt {count}: rotating Psiphon')
-
             try:
                 restart(wait)
             except Exception as error:
-                log(f'Restart/readiness problem: {error}')
+                log(
+                    f"Connection unavailable: {error}"
+                )
                 time.sleep(delay)
                 continue
-        else:
-            log(f'Attempt {count}: checking current tunnel first')
 
         needs_restart = True
 
         try:
             ip = get_ip()
         except Exception as error:
-            log(f'No exit: {error}')
+            log(f"Failed to get exit IP: {error}")
             time.sleep(delay)
             continue
 
-        if ip == last:
-            same += 1
+        if ip == last_ip:
+            same_streak += 1
         else:
-            same = 0
+            same_streak = 0
 
-        last = ip
+        last_ip = ip
 
+        # Already checked this IP recently.
         if ip in seen:
-            log(
-                f'Exit {ip} already checked; '
-                f'repeating (same streak={same})'
-            )
+            elapsed = time.monotonic() - seen[ip]["checked_at"]
 
-            time.sleep(
-                min(300, delay * (1 + same // 4))
-            )
-            continue
+            if seen[ip]["status"] == "RU" and elapsed < 3600:
+                log(
+                    f"Repeated RU exit: {ip}, "
+                    f"streak={same_streak}"
+                )
+
+                pause = min(
+                    120,
+                    delay * (1 + same_streak // 5)
+                )
+
+                time.sleep(pause)
+                continue
 
         try:
-            geo = google_region()
+            google = google_region()
 
-            if get_ip() != ip:
+            # Ensure the IP did not change during the test.
+            verified_ip = get_ip()
+
+            if verified_ip != ip:
                 raise RuntimeError(
-                    'Exit changed during geo test'
+                    f"Exit changed during check: "
+                    f"{ip} -> {verified_ip}"
                 )
 
         except Exception as error:
-            log(f'Google check UNKNOWN for {ip}: {error}')
+            log(
+                f"Google check UNKNOWN for {ip}: {error}"
+            )
+
             time.sleep(delay)
             continue
 
-        log(f'Exit {ip}, Google={geo}')
-        seen.add(ip)
+        seen[ip] = {
+            "status": google,
+            "checked_at": time.monotonic()
+        }
 
-        if geo == 'RU':
-            current = read_json(CONFIG) or {}
+        log(
+            f"Candidate: IP={ip}, Google={google}"
+        )
 
-            if current.get('TargetServerEntry'):
-                update_config({
-                    'TargetServerEntry': '',
-                    'DisableTactics': False,
-                    'EgressRegion': region
-                })
-
+        if google == "RU":
+            log("Rejected: Google reports RU")
+            time.sleep(delay)
             continue
+
+        # Found a non-RU Google exit.
+        log(
+            f"Suitable candidate found: "
+            f"{ip} Google={google}"
+        )
 
         try:
-            if pin_current(ip, geo, region, wait):
+            if pin_current(ip, google, region, wait):
+                log(
+                    f"SUCCESS: {ip} pinned, "
+                    f"Google={google}"
+                )
                 return True
+
         except Exception as error:
-            log(f'Pin failed: {error}; seeking another candidate')
+            log(
+                f"Pin verification failed: {error}"
+            )
+
+            # A failed pin may restore older settings.
+            # Prepare a clean search configuration again.
+            try:
+                prepare_rotation(region)
+            except Exception as recovery_error:
+                log(
+                    f"Rotation preparation failed: "
+                    f"{recovery_error}"
+                )
+
             time.sleep(delay)
+
+    return False
+
 
 
 def monitor(region, interval, wait, delay):
@@ -960,14 +1124,7 @@ systemctl daemon-reload
 systemctl enable psiphon-autopin.service
 systemctl restart psiphon-autopin.service
 
-echo
-echo '[OK] Psiphon Auto-Pin Manager installed.'
-echo '[OK] Hourly monitor enabled.'
-echo '[OK] SOCKS5 for host Xray: 127.0.0.1:40000'
-echo
-echo 'Status: systemctl status psiphon-autopin --no-pager'
-echo 'Logs: journalctl -u psiphon-autopin -f'
-echo 'Check: python3 /opt/psiphon-autopin/psiphon_autopin.py check'
-echo
-echo 'NOTE: Search has no attempt limit.'
-echo 'NOTE: A suitable exit is not guaranteed.'
+echo '[OK] Psiphon Auto-Pin Manager v3.1 installed.'
+echo '[OK] Replay preferences disabled during rotation.'
+echo '[OK] Unlimited search enabled.'
+echo '[OK] Hourly region monitoring enabled.'
