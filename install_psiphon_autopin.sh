@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Forcus Psiphon Auto-Pin Manager v3.3
+# Forcus Psiphon Auto-Pin Manager v3.3.1
 # Author: https://github.com/Forcus356
 # Ubuntu/Debian x86_64
 set -Eeuo pipefail
@@ -55,7 +55,7 @@ REGION=${REGION^^}
 [[ $REGION == AUTO ]] && REGION=''
 mkdir -p "$ROOT" "$CONF" "$APP" "$DATA"
 chmod 700 "$DATA"
-echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v3.3"
+echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v3.3.1"
 
 # Stop old writer before updating executable/config. This does not stop the VPN container.
 systemctl stop psiphon-autopin.service 2>/dev/null || true
@@ -119,7 +119,9 @@ else
 import json,sys
 p,r,socks,http=sys.argv[1:]
 c=json.load(open(p))
-c.update(EgressRegion=r,LocalSocksProxyPort=int(socks),LocalSocksProxyListenAddress='127.0.0.1',LocalHttpProxyPort=int(http),LocalHttpProxyListenAddress='127.0.0.1',TunnelPoolSize=1,EmitDiagnosticNotices=True,DisableReplay=True)
+c.update(EgressRegion=r,ListenInterface='lo',LocalSocksProxyPort=int(socks),LocalHttpProxyPort=int(http),TunnelPoolSize=1,EmitDiagnosticNotices=True,DisableReplay=True)
+c.pop('LocalSocksProxyListenAddress',None)
+c.pop('LocalHttpProxyListenAddress',None)
 with open(p,'w') as f: json.dump(c,f,indent=2); f.write('\n')
 CONFIG_INIT
     tree=$(mktemp)
@@ -151,24 +153,51 @@ fi
 SYNC_CHANGED=$(python3 - "$CONF/psiphon.config" "$DATA/state.json" "$REGION" "$SOCKS_PORT" "$HTTP_PORT" <<'SYNC_REGION'
 import json,sys,os,shutil,datetime
 p,s,r,socks,http=sys.argv[1:];c=json.load(open(p))
-changed=(c.get('EgressRegion','')!=r or c.get('LocalSocksProxyPort')!=int(socks) or c.get('LocalHttpProxyPort')!=int(http))
-if changed:
-    shutil.copy2(p,p+'.before-region-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+routing_changed=(c.get('EgressRegion','')!=r or c.get('LocalSocksProxyPort')!=int(socks) or c.get('LocalHttpProxyPort')!=int(http))
+security_changed=(c.get('ListenInterface')!='lo' or 'LocalSocksProxyListenAddress' in c or 'LocalHttpProxyListenAddress' in c)
+if routing_changed or security_changed:
+    shutil.copy2(p,p+'.before-update-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
     c['EgressRegion']=r
+    c['ListenInterface']='lo'
     c['LocalSocksProxyPort']=int(socks)
-    c['LocalSocksProxyListenAddress']='127.0.0.1'
     c['LocalHttpProxyPort']=int(http)
-    c['LocalHttpProxyListenAddress']='127.0.0.1'
-    c.pop('TargetServerEntry',None)
+    c.pop('LocalSocksProxyListenAddress',None)
+    c.pop('LocalHttpProxyListenAddress',None)
+    if routing_changed:
+        c.pop('TargetServerEntry',None)
+        if os.path.isfile(s):os.unlink(s)
     with open(p,'w') as f:json.dump(c,f,indent=2);f.write('\n')
-    if os.path.isfile(s):os.unlink(s)
-    print('changed')
+    print('security_changed' if security_changed and not routing_changed else 'changed')
 SYNC_REGION
 )
-if [[ "$SYNC_CHANGED" == changed ]]; then
-    echo "[INFO] Region or proxy port changed: restarting Psiphon"
+if [[ -n "$SYNC_CHANGED" ]]; then
+    echo "[INFO] Region, port or loopback security settings changed: restarting Psiphon"
     docker restart "$CONTAINER" >/dev/null
 fi
+
+# Fail closed: ConsoleClient must not expose either unauthenticated proxy on a public interface.
+# This includes configurations inherited from a previously installed Psiphon container.
+# Inspect actual listening sockets, not just the JSON file.
+verify_proxy_binding() {
+    local bad
+    bad=$(ss -H -ltnp | awk -v socks=":$SOCKS_PORT" -v http=":$HTTP_PORT" '
+        {
+          addr=$4
+          if (addr ~ socks "$" || addr ~ http "$") {
+            # Safe: IPv4 loopback, IPv6 loopback. All other bind addresses fail closed.
+            if (addr !~ /^127\.[0-9]+\.[0-9]+\.[0-9]+:/ && addr !~ /^\[::1\]:/) print $0
+          }
+        }')
+    if [[ -n $bad ]]; then
+        echo "[SECURITY ERROR] Psiphon proxy is listening outside localhost:" >&2
+        echo "$bad" >&2
+        echo '[SECURITY ERROR] Stopping Psiphon to prevent exposure.' >&2
+        docker stop "$CONTAINER" >/dev/null || true
+        exit 1
+    fi
+}
+verify_proxy_binding
+
 
 # Recover bootstrap fields if an existing installation does not respond through SOCKS5.
 # Check ONLY through the proxy. A failure must never fall back to a direct IP probe.
@@ -558,7 +587,7 @@ chmod 600 "$DATA/settings.json"
 
 cat > /etc/systemd/system/psiphon-autopin.service <<EOF
 [Unit]
-Description=Forcus Psiphon Auto-Pin v3.3 server rotation and Google geo monitor
+Description=Forcus Psiphon Auto-Pin v3.3.1 server rotation and Google geo monitor
 Wants=network-online.target
 After=network-online.target docker.service
 Requires=docker.service
@@ -572,10 +601,30 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOF
+# Confirm that both proxy sockets are bound only to loopback before enabling monitoring.
+# A slow Psiphon tunnel need not be ready yet; listener visibility is checked for up to 20s.
+for _ in $(seq 1 20); do
+    verify_proxy_binding
+    if ss -H -ltn | awk -v socks=":$SOCKS_PORT" -v http=":$HTTP_PORT" '
+        $4 ~ socks "$" { a=1 } $4 ~ http "$" { b=1 } END { exit !(a && b) }
+    '; then
+        echo '[OK] Both proxy sockets are bound to loopback.'
+        break
+    fi
+    sleep 1
+done
+verify_proxy_binding
+# Do not start monitor when listeners have not appeared; fail closed and preserve config for diagnostics.
+if ! ss -H -ltn | awk -v socks=":$SOCKS_PORT" -v http=":$HTTP_PORT" '
+    $4 ~ socks "$" { a=1 } $4 ~ http "$" { b=1 } END { exit !(a && b) }
+'; then
+    echo '[ERROR] Proxy listeners were not created within 20 seconds; refusing to start monitor.' >&2
+    exit 1
+fi
 systemctl daemon-reload
 systemctl enable psiphon-autopin.service
 systemctl restart psiphon-autopin.service
-printf '\n[OK] Forcus Psiphon Auto-Pin v3.3 installed\n'
+printf '\n[OK] Forcus Psiphon Auto-Pin v3.3.1 installed\n'
 echo '[OK] Distinct Psiphon servers selected via TargetServerEntry.'
 echo "[OK] SOCKS5h: 127.0.0.1:$SOCKS_PORT (Google and IP checks through proxy)."
 echo "[OK] Monitoring every ${INTERVAL}s / unlimited search enabled."
