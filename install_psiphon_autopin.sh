@@ -1,196 +1,90 @@
-
 #!/usr/bin/env bash
-# Forcus Psiphon Auto-Pin Manager v3.1
+# Forcus Psiphon Auto-Pin Manager v3.2
+# Author: https://github.com/Forcus356
 # Ubuntu/Debian x86_64
-#Write by https://github.com/Forcus356
 set -Eeuo pipefail
-
-trap 'echo "[ERROR] line $LINENO. Check journalctl -u psiphon-autopin.service -n 80" >&2' ERR
-
-[[ $EUID -eq 0 ]] || {
-    echo 'Run as root' >&2
-    exit 1
-}
-
+trap 'echo "[ERROR] Line $LINENO; journalctl -u psiphon-autopin -n 80 --no-pager" >&2' ERR
+[[ $EUID -eq 0 ]] || { echo 'Run as root' >&2; exit 1; }
 . /etc/os-release
-case "${ID:-}" in
-    ubuntu|debian) ;;
-    *) echo 'Ubuntu/Debian only' >&2; exit 1 ;;
-esac
-
-[[ $(uname -m) == x86_64 ]] || {
-    echo 'Currently x86_64 only' >&2
-    exit 1
-}
-
+[[ ${ID:-} == ubuntu || ${ID:-} == debian ]] || { echo 'Ubuntu/Debian only' >&2; exit 1; }
+[[ $(uname -m) == x86_64 ]] || { echo 'x86_64 only' >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
-
-ROOT=/opt/vps-psiphon
-CONF=$ROOT/config
-APP=/opt/psiphon-autopin
-DATA=/var/lib/psiphon-autopin
-CONTAINER=vps-psiphon
-REGION=''
-
+ROOT=/opt/vps-psiphon; CONF="$ROOT/config"; APP=/opt/psiphon-autopin
+DATA=/var/lib/psiphon-autopin; CONTAINER=vps-psiphon
+REGION=''; INTERVAL=3600; WAIT=75; DELAY=12
 while (($#)); do
     case "$1" in
-        --region)
-            REGION=${2:?Missing country}
-            shift 2
-            ;;
-        --help)
-            echo 'Usage: install_psiphon_autopin.sh [--region DE|SE|NL|AUTO]'
-            exit 0
-            ;;
-        *)
-            echo "Unknown argument: $1" >&2
-            exit 2
-            ;;
+        --region) REGION=${2:?Missing region}; shift 2 ;;
+        --interval) INTERVAL=${2:?Missing interval}; shift 2 ;;
+        --wait) WAIT=${2:?Missing wait}; shift 2 ;;
+        --delay) DELAY=${2:?Missing delay}; shift 2 ;;
+        --help) echo 'Usage: install_psiphon_autopin.sh [--region DE|AUTO] [--interval 3600] [--wait 75] [--delay 12]'; exit 0 ;;
+        *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
-
 if [[ -z $REGION ]]; then
-    echo 'Psiphon egress country (DE, SE, NL, PL, LT ... or AUTO):'
     if [[ -r /dev/tty ]]; then
-        read -r -p 'Country [DE]: ' REGION </dev/tty
+        read -r -p 'Psiphon country [DE] (or AUTO): ' REGION </dev/tty
+        REGION=${REGION:-DE}
     else
-        echo 'Non-interactive install: use --region DE' >&2
-        exit 2
+        echo 'Noninteractive install: specify --region DE' >&2; exit 2
     fi
-    REGION=${REGION:-DE}
 fi
-
 REGION=${REGION^^}
-
-[[ $REGION == AUTO || $REGION =~ ^[A-Z]{2}$ ]] || {
-    echo 'Invalid ISO country code' >&2
-    exit 2
-}
-
+[[ $REGION == AUTO || $REGION =~ ^[A-Z]{2}$ ]] || { echo 'Invalid country' >&2; exit 2; }
+[[ $INTERVAL =~ ^[0-9]+$ && $WAIT =~ ^[0-9]+$ && $DELAY =~ ^[0-9]+$ ]] || exit 2
+(( INTERVAL >= 60 && WAIT >= 20 && DELAY >= 2 )) || { echo 'Require interval>=60, wait>=20, delay>=2' >&2; exit 2; }
 [[ $REGION == AUTO ]] && REGION=''
+mkdir -p "$ROOT" "$CONF" "$APP" "$DATA"
+chmod 700 "$DATA"
+echo "[INFO] Region=${REGION:-AUTO}; manager v3.2"
 
-echo "[INFO] Selected Psiphon region: ${REGION:-AUTO}"
+# Stop old writer before updating executable/config. This does not stop the VPN container.
+systemctl stop psiphon-autopin.service 2>/dev/null || true
 
-mkdir -p "$APP" "$DATA" "$CONF"
-
-# Install dependencies if missing.
-if ! command -v docker >/dev/null ||
-   ! command -v curl >/dev/null ||
-   ! command -v jq >/dev/null ||
-   ! command -v python3 >/dev/null ||
-   ! command -v column >/dev/null; then
-
+NEEDS=()
+for command in docker curl jq python3 column go ss; do
+    command -v "$command" >/dev/null 2>&1 || NEEDS+=("$command")
+done
+if ((${#NEEDS[@]})); then
     apt-get update
-    apt-get install -y \
-        ca-certificates curl python3 jq \
-        util-linux bsdextrautils docker.io
+    apt-get install -y ca-certificates curl python3 jq util-linux bsdextrautils docker.io golang-go iproute2
 fi
-
 systemctl enable --now docker
 
 if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
-    echo '[INFO] Existing Psiphon found. Preserving container.'
-
-    [[ -f "$CONF/psiphon.config" ]] || {
-        echo "[ERROR] Configuration not found at $CONF" >&2
-        docker inspect "$CONTAINER" --format '{{json .Mounts}}' >&2
-        exit 2
-    }
-
+    [[ -f $CONF/psiphon.config ]] || { echo "Missing $CONF/psiphon.config" >&2; exit 1; }
+    echo '[INFO] Existing Psiphon container preserved.'
     docker start "$CONTAINER" >/dev/null || true
 else
-    [[ ! -f "$CONF/psiphon.config" ]] || {
-        echo '[ERROR] Existing config without expected container.' >&2
-        exit 2
-    }
-
-    if ss -ltnH 2>/dev/null |
-       awk '{print $4}' |
-       grep -Eq '(^|:)40000$'; then
-        echo '[ERROR] Port 40000 is already in use.' >&2
-        exit 2
+    [[ ! -e $CONF/psiphon.config ]] || { echo 'Config exists but container missing; refusing overwrite.' >&2; exit 1; }
+    if ss -ltnH | awk '{print $4}' | grep -Eq '(^|:)40000$'; then
+        echo 'SOCKS port 40000 already occupied' >&2; exit 1
     fi
-
-    echo '[INFO] Installing Psiphon...'
-
+    echo '[INFO] Bootstrapping Psiphon...'
     docker pull swarupsengupta2007/psiphon:latest
-
-    docker run --rm \
-        --entrypoint cat \
-        swarupsengupta2007/psiphon:latest \
-        /etc/psiphon/psiphon.config \
-        > "$CONF/psiphon.config"
-
+    docker run --rm --entrypoint cat swarupsengupta2007/psiphon:latest /etc/psiphon/psiphon.config > "$CONF/psiphon.config"
     chmod 600 "$CONF/psiphon.config"
-
-    python3 - "$CONF/psiphon.config" "$REGION" <<'PYSET'
-import json
-import sys
-
-path, region = sys.argv[1:]
-
-with open(path) as f:
-    config = json.load(f)
-
-config.update({
-    'EgressRegion': region,
-    'LocalSocksProxyPort': 40000,
-    'LocalSocksProxyListenAddress': '127.0.0.1',
-    'LocalHttpProxyPort': 40001,
-    'LocalHttpProxyListenAddress': '127.0.0.1',
-    'TunnelPoolSize': 1,
-    'EmitDiagnosticNotices': True,
-    'DisableReplay': True,
-    'ReplayCandidateCount': 0
-})
-
-with open(path, 'w') as f:
-    json.dump(config, f, indent=2)
-    f.write('\n')
-PYSET
-
-    TREE=$(mktemp)
-
-    curl -fLsS --retry 3 \
-        'https://api.github.com/repos/Psiphon-Labs/psiphon-tunnel-core-binaries/git/trees/master?recursive=1' \
-        -o "$TREE"
-
-    BINARY_PATH=$(python3 - "$TREE" <<'PYBIN'
-import json
-import sys
-
-with open(sys.argv[1]) as f:
-    tree = json.load(f)['tree']
-
-matches = [
-    x['path'] for x in tree
-    if x['type'] == 'blob'
-    and x['path'].startswith('linux/')
-    and (
-        'amd64' in x['path'].lower()
-        or 'x86_64' in x['path'].lower()
-    )
-    and (
-        'consoleclient' in x['path'].lower()
-        or 'psiphon-tunnel-core' in x['path'].lower()
-    )
-]
-
-if len(matches) != 1:
-    sys.exit('Cannot identify official binary: ' + repr(matches))
-
-print(matches[0])
-PYBIN
+    python3 - "$CONF/psiphon.config" "$REGION" <<'CONFIG_INIT'
+import json,sys
+p,r=sys.argv[1:]
+c=json.load(open(p))
+c.update(EgressRegion=r,LocalSocksProxyPort=40000,LocalSocksProxyListenAddress='127.0.0.1',LocalHttpProxyPort=40001,LocalHttpProxyListenAddress='127.0.0.1',TunnelPoolSize=1,EmitDiagnosticNotices=True,DisableReplay=True)
+with open(p,'w') as f: json.dump(c,f,indent=2); f.write('\n')
+CONFIG_INIT
+    tree=$(mktemp)
+    curl --fail --location --silent --show-error --retry 3 'https://api.github.com/repos/Psiphon-Labs/psiphon-tunnel-core-binaries/git/trees/master?recursive=1' -o "$tree"
+    path=$(python3 - "$tree" <<'PICK_BINARY'
+import json,sys
+rows=json.load(open(sys.argv[1]))['tree']
+m=[v['path'] for v in rows if v['type']=='blob' and v['path'].startswith('linux/') and any(x in v['path'].lower() for x in ('amd64','x86_64')) and any(x in v['path'].lower() for x in ('consoleclient','psiphon-tunnel-core'))]
+if len(m)!=1: raise SystemExit('Expected one official executable: '+str(m))
+print(m[0])
+PICK_BINARY
 )
-
-    rm -f "$TREE"
-
-    curl -fLsS --retry 3 \
-        "https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/$BINARY_PATH" \
-        -o "$ROOT/ConsoleClient"
-
+    rm -f "$tree"
+    curl --fail --location --silent --show-error --retry 3 "https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/$path" -o "$ROOT/ConsoleClient"
     chmod 755 "$ROOT/ConsoleClient"
-
     cat > "$ROOT/Dockerfile" <<'DOCKERFILE'
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -198,132 +92,135 @@ COPY ConsoleClient /usr/local/bin/ConsoleClient
 WORKDIR /config
 CMD ["/usr/local/bin/ConsoleClient", "-config", "/config/psiphon.config", "-dataRootDirectory", "/config"]
 DOCKERFILE
-
     docker build -t local-psiphon-console:latest "$ROOT"
-
-    docker run -d \
-        --name "$CONTAINER" \
-        --restart unless-stopped \
-        --network host \
-        -v "$CONF:/config" \
-        local-psiphon-console:latest >/dev/null
-
-    echo '[OK] Psiphon container created.'
+    docker run -d --name "$CONTAINER" --restart unless-stopped --network host -v "$CONF:/config" local-psiphon-console:latest >/dev/null
+    echo '[OK] Created Psiphon container.'
 fi
 
-# Repair missing bootstrap parameters only if proxy is not working.
-if ! curl -4 -fsS --max-time 12 \
-    --proxy socks5h://127.0.0.1:40000 \
-    https://api.ipify.org >/dev/null 2>&1; then
-
-    echo '[INFO] Checking Psiphon bootstrap configuration...'
-
+# Recover bootstrap fields if an existing installation does not respond through SOCKS5.
+# Check ONLY through the proxy. A failure must never fall back to a direct IP probe.
+if ! curl -4 -fsS --max-time 15 --noproxy '' --proxy socks5h://127.0.0.1:40000 https://api.ipify.org >/dev/null 2>&1; then
+    echo '[INFO] Checking bootstrap fields (SOCKS5 not yet responding)...'
     docker pull swarupsengupta2007/psiphon:latest
-
-    TEMPLATE=$(mktemp)
-
-    docker run --rm \
-        --entrypoint cat \
-        swarupsengupta2007/psiphon:latest \
-        /etc/psiphon/psiphon.config > "$TEMPLATE"
-
-    python3 - "$CONF/psiphon.config" "$TEMPLATE" <<'PYMERGE'
-import datetime
-import json
-import shutil
-import sys
-
-path, template_path = sys.argv[1:]
-
-with open(path) as f:
-    current = json.load(f)
-
-with open(template_path) as f:
-    template = json.load(f)
-
-keys = [
-    'RemoteServerListURLs',
-    'RemoteServerListSignaturePublicKey',
-    'ObfuscatedServerListRootURLs',
-    'ObfuscatedServerListSignaturePublicKey',
-    'ServerEntrySignaturePublicKey',
-    'SponsorId',
-    'PropagationChannelId'
-]
-
-missing = [
-    key for key in keys
-    if not current.get(key) and template.get(key)
-]
-
+    template=$(mktemp)
+    docker run --rm --entrypoint cat swarupsengupta2007/psiphon:latest /etc/psiphon/psiphon.config > "$template"
+    python3 - "$CONF/psiphon.config" "$template" <<'BOOTSTRAP'
+import json,sys,shutil,datetime
+p,t=sys.argv[1:]; a=json.load(open(p)); b=json.load(open(t))
+keys=('RemoteServerListURLs','RemoteServerListSignaturePublicKey','ObfuscatedServerListRootURLs','ObfuscatedServerListSignaturePublicKey','ServerEntrySignaturePublicKey','SponsorId','PropagationChannelId')
+missing=[k for k in keys if not a.get(k) and b.get(k)]
 if missing:
-    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-    shutil.copy2(path, path + '.before-bootstrap-' + stamp)
-
-    for key in missing:
-        current[key] = template[key]
-
-    with open(path, 'w') as f:
-        json.dump(current, f, indent=2)
-        f.write('\n')
-
-    print('[INFO] Added bootstrap keys:', ', '.join(missing))
-else:
-    print('[INFO] No missing bootstrap keys')
-PYMERGE
-
-    rm -f "$TEMPLATE"
+    shutil.copy2(p,p+'.bootstrap-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+    for k in missing:a[k]=b[k]
+    with open(p,'w') as f:json.dump(a,f,indent=2);f.write('\n')
+print('Bootstrap fields added:',missing)
+BOOTSTRAP
+    rm -f "$template"
     docker restart "$CONTAINER" >/dev/null
-else
-    echo '[OK] Existing SOCKS5 tunnel is responding.'
 fi
 
-# Synchronize selected region without restarting a healthy tunnel.
-python3 - "$CONF/psiphon.config" "$REGION" <<'PYREGION'
-import json
-import os
+# Update the region on re-install. Invalidate stale pin state when region changes.
+python3 - "$CONF/psiphon.config" "$DATA/state.json" "$REGION" <<'SYNC_REGION'
+import json,sys,os,shutil,datetime
+p,s,r=sys.argv[1:];c=json.load(open(p))
+if c.get('EgressRegion','')!=r:
+    shutil.copy2(p,p+'.before-region-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+    c['EgressRegion']=r
+    c.pop('TargetServerEntry',None)
+    with open(p,'w') as f:json.dump(c,f,indent=2);f.write('\n')
+    if os.path.isfile(s):os.unlink(s)
+    print('[INFO] Country changed; old pin invalidated.')
+SYNC_REGION
+
+# Google region classifier from Davoyan. Force its proxy requests to use remote SOCKS DNS.
+curl -fLsS --retry 3 https://raw.githubusercontent.com/Davoyan/ipregion/main/ipregion.sh -o "$APP/ipregion.sh"
+python3 - "$APP/ipregion.sh" <<'PATCH_IPREGION'
+from pathlib import Path
 import sys
-import shutil
-from datetime import datetime
+p=Path(sys.argv[1]);s=p.read_text()
+if 'socks5://$PROXY_ADDR' not in s: raise SystemExit('ipregion proxy usage changed: review before deployment')
+s=s.replace('socks5://$PROXY_ADDR','socks5h://$PROXY_ADDR')
+p.write_text(s)
+PATCH_IPREGION
+chmod 700 "$APP/ipregion.sh"
 
-path, region = sys.argv[1:]
+cat > "$APP/psiphon-server-export.go" <<'GO_EXPORTER'
+package main
 
-with open(path) as f:
-    config = json.load(f)
+import (
+    "encoding/hex"
+    "encoding/json"
+    "fmt"
+    "net"
+    "os"
+    "sort"
+    "strings"
+    "time"
+    bolt "go.etcd.io/bbolt"
+)
 
-if config.get("EgressRegion", "") != region:
-    shutil.copy2(
-        path,
-        path + ".backup-" + datetime.now().strftime("%Y%m%d-%H%M%S")
-    )
-    config["EgressRegion"] = region
-    config.pop("TargetServerEntry", None)
-    state = "/var/lib/psiphon-autopin/state.json"
+type Entry struct {
+    Tag string `json:"tag"`
+    IP string `json:"ipAddress"`
+    Region string `json:"region"`
+    Port string `json:"webServerPort"`
+    Secret string `json:"webServerSecret"`
+    Cert string `json:"webServerCertificate"`
+    Capabilities []string `json:"capabilities"`
+    Version int `json:"configurationVersion"`
+}
+type Candidate struct {
+    ServerIP string `json:"server_ip"`
+    Region string `json:"region"`
+    Diagnostic string `json:"diagnostic"`
+    Encoded string `json:"encoded"`
+    Version int `json:"-"`
+}
+func main() {
+    if len(os.Args)!=3 { fmt.Fprintln(os.Stderr,"usage: exporter DATABASE REGION");os.Exit(2) }
+    db,err:=bolt.Open(os.Args[1],0400,&bolt.Options{ReadOnly:true,Timeout:5*time.Second})
+    if err!=nil {panic(err)}
+    defer db.Close()
+    found:=make(map[string]Candidate)
+    err=db.View(func(tx *bolt.Tx) error {
+        var walk func(*bolt.Bucket) error
+        walk=func(b *bolt.Bucket) error {
+            return b.ForEach(func(k,v []byte) error {
+                if v==nil {child:=b.Bucket(k);if child!=nil{return walk(child)};return nil}
+                var e Entry
+                if json.Unmarshal(v,&e)!=nil{return nil}
+                if net.ParseIP(e.IP)==nil || len(e.Tag)<8 || len(e.Capabilities)==0 || (os.Args[2]!="" && e.Region!=os.Args[2]) {return nil}
+                fields:=[]string{"0","0","0","0"}
+                if e.Cert!="" {fields=[]string{e.IP,e.Port,e.Secret,e.Cert}}
+                // JSON bytes originate in Psiphon's datastore. No credentials are printed.
+                enc:=hex.EncodeToString([]byte(strings.Join(fields," ")+" "+string(v)))
+                candidate:=Candidate{ServerIP:e.IP,Region:e.Region,Diagnostic:e.Tag[:8],Encoded:enc,Version:e.Version}
+                if old,exists:=found[e.IP];!exists || e.Version>old.Version {found[e.IP]=candidate}
+                return nil
+            })
+        }
+        return tx.ForEach(func(_ []byte,b *bolt.Bucket) error{return walk(b)})
+    })
+    if err!=nil {panic(err)}
+    keys:=make([]string,0,len(found))
+    for ip:=range found {keys=append(keys,ip)}
+    sort.Strings(keys)
+    for _,ip:=range keys {b,_:=json.Marshal(found[ip]);fmt.Println(string(b))}
+}
+GO_EXPORTER
 
-    if os.path.exists(state):
-        os.remove(state)
-
-    with open(path, "w") as f:
-        json.dump(config, f, indent=2)
-        f.write("\n")
-
-    print("[INFO] Region updated; pending next Psiphon restart")
-PYREGION
-
-# Install Google region detector.
-if [[ ! -s "$APP/ipregion.sh" ]]; then
-    curl -fLsS --retry 3 \
-        https://raw.githubusercontent.com/Davoyan/ipregion/main/ipregion.sh \
-        -o "$APP/ipregion.sh"
+# Build the exporter only when its source changes.
+if [[ ! -x "$APP/psiphon-server-export" || "$APP/psiphon-server-export.go" -nt "$APP/psiphon-server-export" ]]; then
+    builddir=$(mktemp -d)
+    cp "$APP/psiphon-server-export.go" "$builddir/main.go"
+    ( cd "$builddir" && go mod init foc.us/psiphon-exporter >/dev/null && go get go.etcd.io/bbolt@v1.3.11 && go build -o "$APP/psiphon-server-export" . )
+    rm -rf "$builddir"
+    chmod 700 "$APP/psiphon-server-export"
 fi
 
-chmod 755 "$APP/ipregion.sh"
-
-# Embedded Python manager.
-cat > "$APP/psiphon_autopin.py" <<'AUTOPIN_MANAGER_SOURCE'
+cat > "$APP/psiphon_autopin.py" <<'PY_MANAGER'
 #!/usr/bin/env python3
-"""Psiphon Auto-Pin Manager."""
-
+"""Forcus Psiphon Auto-Pin v3.2: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import datetime as dt
 import fcntl
@@ -331,6 +228,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import random
 import re
 import shutil
 import subprocess
@@ -338,793 +236,283 @@ import sys
 import tempfile
 import time
 
-BASE = Path('/opt/psiphon-autopin')
-STATE_DIR = Path('/var/lib/psiphon-autopin')
-CONFIG = Path('/opt/vps-psiphon/config/psiphon.config')
-
-CONTAINER = 'vps-psiphon'
-PROXY = '127.0.0.1:40000'
-IPREGION = BASE / 'ipregion.sh'
-
+BASE=Path('/opt/psiphon-autopin')
+DATA=Path('/var/lib/psiphon-autopin')
+CONFIG=Path('/opt/vps-psiphon/config/psiphon.config')
+CONTAINER='vps-psiphon'
+PROXY='127.0.0.1:40000'
+STATE=DATA/'state.json'
 
 def log(message):
-    timestamp = (
-        dt.datetime.now(dt.timezone.utc)
-        .astimezone()
-        .isoformat(timespec='seconds')
-    )
-    print(timestamp, message, flush=True)
+    print(dt.datetime.now().astimezone().isoformat(timespec='seconds'),message,flush=True)
 
+def run(args, timeout=60, merge=False):
+    p=subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT if merge else subprocess.PIPE,text=True,timeout=timeout)
+    if p.returncode:
+        error=p.stdout if merge else p.stderr
+        raise RuntimeError(f'{args[0]} rc={p.returncode}: {(error or "")[-450:]}')
+    return p.stdout
 
-def run(args, timeout=40, check=True, merge=False):
-    process = subprocess.run(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT if merge else subprocess.PIPE,
-        text=True,
-        timeout=timeout
-    )
+def read_json(p, default=None):
+    try:return json.loads(Path(p).read_text())
+    except (OSError,ValueError):return default
 
-    if check and process.returncode:
-        error = process.stdout if merge else process.stderr
-        raise RuntimeError(
-            f'{args[0]} exited {process.returncode}: {error[-600:]}'
-        )
-
-    return process.stdout
-
-
-def read_json(path, fallback=None):
+def atomic_json(p, obj):
+    p=Path(p);p.parent.mkdir(parents=True,exist_ok=True)
+    st=p.stat() if p.exists() else None
+    name=None
     try:
-        return json.loads(Path(path).read_text())
-    except (OSError, json.JSONDecodeError):
-        return fallback
-
-
-def write_json_atomic(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    stat = path.stat() if path.exists() else None
-    tmp = None
-
-    try:
-        with tempfile.NamedTemporaryFile(
-            'w',
-            encoding='utf8',
-            dir=path.parent,
-            prefix='.autopin-',
-            delete=False
-        ) as f:
-            tmp = f.name
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.write('\n')
-            f.flush()
-            os.fsync(f.fileno())
-
-        if stat:
-            os.chown(tmp, stat.st_uid, stat.st_gid)
-            os.chmod(tmp, stat.st_mode & 0o777)
-        else:
-            os.chmod(tmp, 0o600)
-
-        os.replace(tmp, path)
-
+        with tempfile.NamedTemporaryFile('w',dir=p.parent,prefix='.autopin-',delete=False) as f:
+            name=f.name;json.dump(obj,f,indent=2);f.write('\n');f.flush();os.fsync(f.fileno())
+        if st:os.chown(name,st.st_uid,st.st_gid);os.chmod(name,st.st_mode & 0o777)
+        else:os.chmod(name,0o600)
+        os.replace(name,p)
     finally:
-        if tmp and os.path.exists(tmp):
-            os.unlink(tmp)
+        if name and os.path.exists(name):os.unlink(name)
 
+def change_config(updates):
+    obj=read_json(CONFIG)
+    if not isinstance(obj,dict):raise RuntimeError('Invalid Psiphon configuration')
+    obj.update(updates)
+    atomic_json(CONFIG,obj)
 
-def update_config(changes):
-    if not CONFIG.is_file():
-        raise RuntimeError(f'Missing config: {CONFIG}')
-
-    old = read_json(CONFIG)
-
-    if not isinstance(old, dict):
-        raise RuntimeError('Psiphon config is not valid JSON')
-
-    stamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
-    backup = CONFIG.with_name(
-        CONFIG.name + '.autopin-backup-' + stamp
-    )
-
-    shutil.copy2(CONFIG, backup)
-
-    new = dict(old)
-    new.update(changes)
-    write_json_atomic(CONFIG, new)
-
-    log(f'Config backed up: {backup}')
-    return backup
-
-
-def restore_config(backup):
-    if backup and Path(backup).is_file():
-        shutil.copy2(backup, CONFIG)
-        log(f'Restored previous config: {backup}')
-
-
-def get_ip():
-    value = run([
-        'curl', '-4', '-fsS',
-        '--max-time', '12',
-        '--proxy', f'socks5h://{PROXY}',
-        'https://api.ipify.org'
-    ], timeout=16).strip()
-
-    if ipaddress.ip_address(value).version != 4:
-        raise RuntimeError('Expected IPv4 exit')
-
-    return value
-
+def socks_ip():
+    # Explicit SOCKS5h proxy, remote DNS, no direct fallback or proxy bypass.
+    ip=run(['curl','-4','-fsS','--connect-timeout','7','--max-time','15','--noproxy','', '--proxy',f'socks5h://{PROXY}','https://api.ipify.org'],timeout=20).strip()
+    if ipaddress.ip_address(ip).version!=4:raise RuntimeError('Unexpected IPv4 address')
+    return ip
 
 def google_region():
-    if not IPREGION.is_file():
-        raise RuntimeError(f'Missing {IPREGION}')
-
-    result = run([
-        'bash', str(IPREGION),
-        '--proxy', PROXY,
-        '--ipv4',
-        '--group', 'custom',
-        '--json'
-    ], timeout=210)
-
-    report = json.loads(result)
-    rows = report.get('results', {}).get('custom', [])
-
-    values = [
-        str(row.get('ipv4', '')).strip().upper()
-        for row in rows
-        if row.get('service') == 'Google'
-    ]
-
-    if len(values) != 1 or not re.fullmatch(r'[A-Z]{2}', values[0]):
-        raise RuntimeError(f'Google country UNKNOWN: {values}')
-
-    return values[0]
-
+    script=BASE/'ipregion.sh'
+    if not script.is_file():raise RuntimeError('ipregion missing')
+    env=os.environ.copy()
+    # Also force any helper curl executed by ipregion through Psiphon.
+    # run() does not accept env, so call subprocess explicitly here.
+    env.update(ALL_PROXY=f'socks5h://{PROXY}',HTTP_PROXY=f'socks5h://{PROXY}',HTTPS_PROXY=f'socks5h://{PROXY}',http_proxy=f'socks5h://{PROXY}',https_proxy=f'socks5h://{PROXY}',all_proxy=f'socks5h://{PROXY}',NO_PROXY='',no_proxy='')
+    cmd=['bash',str(script),'--proxy',PROXY,'--ipv4','--group','custom','--json']
+    p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=210,env=env)
+    if p.returncode:raise RuntimeError(f'ipregion failed: {p.stderr[-350:]}')
+    report=json.loads(p.stdout)
+    rows=report.get('results',{}).get('custom',[])
+    geo=[str(x.get('ipv4','')).strip().upper() for x in rows if x.get('service')=='Google']
+    if len(geo)!=1 or not re.fullmatch('[A-Z]{2}',geo[0]):raise RuntimeError(f'Google region UNKNOWN: {geo}')
+    return geo[0]
 
 def probe():
-    before = get_ip()
-    region = google_region()
-    after = get_ip()
+    first=socks_ip();country=google_region();last=socks_ip()
+    if first!=last:raise RuntimeError(f'Exit changed during check: {first} -> {last}')
+    log(f'Exit={last}, Google={country} [SOCKS5h]')
+    return last,country
 
-    if before != after:
-        raise RuntimeError(
-            f'Exit changed during check: {before} -> {after}'
-        )
+def started_at():
+    return run(['docker','inspect','-f','{{.State.StartedAt}}',CONTAINER]).strip()
 
-    log(f'Exit={after}, Google={region}')
-    return after, region
+def connected_id():
+    data=run(['docker','logs','--since',started_at(),CONTAINER],timeout=30,merge=True)
+    last=None
+    for line in data.splitlines():
+        try: obj=json.loads(line)
+        except ValueError:continue
+        if obj.get('noticeType')=='ConnectedServer':last=(obj.get('data') or {}).get('diagnosticID')
+    if not last or not re.fullmatch(r'[A-Za-z0-9+/]{8}',last):raise RuntimeError('No valid ConnectedServer ID in current Docker session')
+    return last
 
-
-def docker_started_at():
-    return run([
-        'docker', 'inspect',
-        '-f', '{{.State.StartedAt}}',
-        CONTAINER
-    ]).strip()
-
-
-def live_diagnostic():
-    logs = run([
-        'docker', 'logs',
-        '--since', docker_started_at(),
-        CONTAINER
-    ], timeout=30, merge=True)
-
-    connected = None
-    timestamp = None
-
-    for line in logs.splitlines():
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        kind = obj.get('noticeType')
-        data = obj.get('data') or {}
-
-        if kind == 'ConnectedServer':
-            connected = data.get('diagnosticID')
-        elif kind == 'ServerTimestamp':
-            timestamp = data.get('diagnosticID')
-
-    if not connected or connected != timestamp:
-        raise RuntimeError(
-            f'Current server ID ambiguous '
-            f'(Connected={connected}, Timestamp={timestamp})'
-        )
-
-    if not re.fullmatch(r'[A-Za-z0-9+/]{8}', connected):
-        raise RuntimeError('Invalid diagnosticID')
-
-    return connected
-
-
-def find_datastore():
-    root = CONFIG.parent
-
-    exact = (
-        root /
-        'ca.psiphon.PsiphonTunnel.tunnel-core/datastore/psiphon.boltdb'
-    )
-
-    if exact.is_file():
-        return exact
-
-    matches = list(root.glob('**/psiphon.boltdb'))
-
-    if len(matches) != 1:
-        raise RuntimeError(
-            f'Expected one BoltDB in {root}, found {len(matches)}'
-        )
-
+def db_path():
+    matches=list(CONFIG.parent.glob('**/psiphon.boltdb'))
+    if len(matches)!=1:raise RuntimeError(f'Expected exactly one BoltDB, got {len(matches)}')
     return matches[0]
 
+def docker_restart(wait):
+    run(['docker','restart',CONTAINER],timeout=90)
+    deadline=time.monotonic()+wait;error='unknown'
+    while time.monotonic()<deadline:
+        try:return socks_ip()
+        except Exception as exc:error=str(exc);time.sleep(2)
+    raise RuntimeError(f'Psiphon not ready in {wait}s: {error}')
 
-def server_entry(diagnostic, region):
-    raw = (
-        find_datastore()
-        .read_bytes()
-        .decode('utf-8', errors='replace')
-    )
-
-    decoder = json.JSONDecoder()
-    matches = []
-
-    for match in re.finditer(r'\{', raw):
-        try:
-            entry, end = decoder.raw_decode(raw, match.start())
-        except (ValueError, RecursionError):
-            continue
-
-        if not isinstance(entry, dict):
-            continue
-
-        if not str(entry.get('tag', '')).startswith(diagnostic):
-            continue
-
-        if not entry.get('ipAddress') or not entry.get('capabilities'):
-            continue
-
-        if '\ufffd' in raw[match.start():end]:
-            continue
-
-        if region and entry.get('region') != region:
-            continue
-
-        matches.append(entry)
-
-    if not matches or len({
-        value['ipAddress'] for value in matches
-    }) != 1:
-        raise RuntimeError(
-            f'Server entry missing or ambiguous: {len(matches)}'
-        )
-
-    return max(
-        matches,
-        key=lambda value: int(
-            value.get('configurationVersion', 0)
-        )
-    )
-
-
-def restart(wait_seconds):
-    run(["docker", "restart", CONTAINER], timeout=90)
-
-    deadline = time.monotonic() + wait_seconds
-    last_error = None
-
-    while time.monotonic() < deadline:
-        try:
-            ip = get_ip()
-            log(f"Psiphon ready: exit={ip}")
-            return ip
-        except Exception as error:
-            last_error = error
-            time.sleep(2)
-
-    raise RuntimeError(
-        f"Psiphon not ready after {wait_seconds}s: {last_error}"
-    )
-
-
-def pin_current(ip, geo, region, wait_seconds):
-    diagnostic = live_diagnostic()
-    entry = server_entry(diagnostic, region)
-
-    target = (
-        '0 0 0 0 ' +
-        json.dumps(entry, separators=(',', ':'))
-    ).encode().hex()
-
-    before = update_config({
-        'TargetServerEntry': target,
-        'TunnelPoolSize': 1,
-        'EgressRegion': region,
-        'DisableTactics': True,
-        'InitialLimitTunnelProtocols': [],
-        'InitialLimitTunnelProtocolsCandidateCount': 0,
-        'EmitDiagnosticNotices': True,
-        'EmitDiagnosticNetworkParameters': False
-    })
-
-    log(
-        f'Pinning diagnosticID={diagnostic}, '
-        f'server={entry["ipAddress"]}, exit={ip}'
-    )
-
+def collect_candidates(region):
+    # BoltDB is read only with the container stopped; always start it again.
+    log('Exporting distinct server entries from read-only BoltDB...')
+    run(['docker','stop',CONTAINER],timeout=90)
     try:
-        restart(wait_seconds)
-        new_ip, new_geo = probe()
+        raw=run([str(BASE/'psiphon-server-export'),str(db_path()),region],timeout=120)
+        rows=[json.loads(line) for line in raw.splitlines() if line.strip()]
+        rows=[v for v in rows if v.get('server_ip') and v.get('diagnostic') and v.get('encoded')]
+        if not rows:raise RuntimeError(f'No known servers in region {region or "AUTO"}')
+        log(f'Loaded {len(rows)} distinct servers')
+        return rows
+    finally:
+        run(['docker','start',CONTAINER],timeout=90)
 
-        if new_ip != ip or new_geo != geo:
-            raise RuntimeError(
-                f'Pin verification failed: '
-                f'{new_ip} Google={new_geo}, '
-                f'expected {ip} {geo}'
-            )
+def apply_candidate(candidate,region):
+    change_config({'EgressRegion':region,'TargetServerEntry':candidate['encoded'],'TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True,'DisableTactics':False})
 
-        write_json_atomic(
-            STATE_DIR / 'state.json',
-            {
-                'ip': ip,
-                'google_region': geo,
-                'region': region,
-                'verified_at': (
-                    dt.datetime.now(dt.timezone.utc).isoformat()
-                ),
-                'diagnostic_id': diagnostic
-            }
-        )
+def clear_target(region):
+    change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True,'DisableTactics':False})
 
-        log(f'PIN VERIFIED: {ip}, Google={geo}')
+def verify_pin_current(region):
+    state=read_json(STATE,{}) or {}
+    config=read_json(CONFIG,{}) or {}
+    if state.get('region')!=region or not state.get('ip') or not config.get('TargetServerEntry'):
+        return False
+    ip,geo=probe()
+    diag=connected_id()
+    if ip==state['ip'] and geo!='RU' and diag==state.get('diagnostic_id'):
+        log(f'Existing pin healthy: {ip}, {geo}, server={diag}')
         return True
-
-    except Exception:
-        restore_config(before)
-
-        try:
-            restart(wait_seconds)
-        except Exception as error:
-            log(f'Warning: recovery restart failed: {error}')
-
-        raise
-
-
-def prepare_rotation(region):
-    """
-    Prepare Psiphon for selecting another server.
-
-    Disable replay preference, remove an existing pin,
-    and preserve the server datastore.
-    """
-
-    config = read_json(CONFIG)
-
-    if not isinstance(config, dict):
-        raise RuntimeError(
-            "Cannot prepare rotation: invalid configuration"
-        )
-
-    changes = {
-        "DisableReplay": True,
-        "ReplayCandidateCount": 0,
-        "TargetServerEntry": "",
-        "DisableTactics": False,
-        "EgressRegion": region,
-        "InitialLimitTunnelProtocols": [],
-        "InitialLimitTunnelProtocolsCandidateCount": 0
-    }
-
-    changed = {
-        key: value
-        for key, value in changes.items()
-        if config.get(key) != value
-    }
-
-    if changed:
-        update_config(changed)
-        log(
-            "Rotation prepared: "
-            "replay preference disabled; "
-            "previous target released"
-        )
-    else:
-        log("Rotation settings already active")
-
-    return bool(changed)
-
-
-
-def search(region, wait, delay, rotate_first=False):
-    """
-    Search indefinitely for a non-RU Google exit.
-
-    Keep the Psiphon datastore intact, disable replay
-    preferences and verify pinned connections.
-    """
-
-    log(
-        f"Search started: region={region or 'AUTO'}, "
-        "attempt limit=UNLIMITED"
-    )
-
-    config = read_json(CONFIG)
-
-    if not isinstance(config, dict):
-        raise RuntimeError("Psiphon config missing or invalid")
-
-    # Check the current connection before modifying anything.
-    # This avoids disrupting a healthy existing tunnel.
-    try:
-        current_ip, current_geo = probe()
-
-        if current_geo != "RU":
-            log(
-                f"Existing exit is acceptable: "
-                f"{current_ip} Google={current_geo}"
-            )
-
-            try:
-                pin_current(
-                    current_ip,
-                    current_geo,
-                    region,
-                    wait
-                )
-                return True
-            except Exception as error:
-                log(
-                    f"Existing exit pin failed: {error}"
-                )
-    except Exception as error:
-        log(f"Initial connection check failed: {error}")
-
-    # Only prepare rotation if the existing connection
-    # is unacceptable or pinning failed.
-    prepare_rotation(region)
-
-    seen = {}
-    last_ip = None
-    same_streak = 0
-    attempt = 0
-
-    # The updated configuration requires a restart.
-    needs_restart = True
-
-    while True:
-        attempt += 1
-
-        log(f"Attempt {attempt}: rotating Psiphon")
-
-        if needs_restart:
-            try:
-                restart(wait)
-            except Exception as error:
-                log(
-                    f"Connection unavailable: {error}"
-                )
-                time.sleep(delay)
-                continue
-
-        needs_restart = True
-
-        try:
-            ip = get_ip()
-        except Exception as error:
-            log(f"Failed to get exit IP: {error}")
-            time.sleep(delay)
-            continue
-
-        if ip == last_ip:
-            same_streak += 1
-        else:
-            same_streak = 0
-
-        last_ip = ip
-
-        # Already checked this IP recently.
-        if ip in seen:
-            elapsed = time.monotonic() - seen[ip]["checked_at"]
-
-            if seen[ip]["status"] == "RU" and elapsed < 3600:
-                log(
-                    f"Repeated RU exit: {ip}, "
-                    f"streak={same_streak}"
-                )
-
-                pause = min(
-                    120,
-                    delay * (1 + same_streak // 5)
-                )
-
-                time.sleep(pause)
-                continue
-
-        try:
-            google = google_region()
-
-            # Ensure the IP did not change during the test.
-            verified_ip = get_ip()
-
-            if verified_ip != ip:
-                raise RuntimeError(
-                    f"Exit changed during check: "
-                    f"{ip} -> {verified_ip}"
-                )
-
-        except Exception as error:
-            log(
-                f"Google check UNKNOWN for {ip}: {error}"
-            )
-
-            time.sleep(delay)
-            continue
-
-        seen[ip] = {
-            "status": google,
-            "checked_at": time.monotonic()
-        }
-
-        log(
-            f"Candidate: IP={ip}, Google={google}"
-        )
-
-        if google == "RU":
-            log("Rejected: Google reports RU")
-            time.sleep(delay)
-            continue
-
-        # Found a non-RU Google exit.
-        log(
-            f"Suitable candidate found: "
-            f"{ip} Google={google}"
-        )
-
-        try:
-            if pin_current(ip, google, region, wait):
-                log(
-                    f"SUCCESS: {ip} pinned, "
-                    f"Google={google}"
-                )
-                return True
-
-        except Exception as error:
-            log(
-                f"Pin verification failed: {error}"
-            )
-
-            # A failed pin may restore older settings.
-            # Prepare a clean search configuration again.
-            try:
-                prepare_rotation(region)
-            except Exception as recovery_error:
-                log(
-                    f"Rotation preparation failed: "
-                    f"{recovery_error}"
-                )
-
-            time.sleep(delay)
-
     return False
 
+def search(region,wait,delay):
+    log(f'Server rotation started: {region or "AUTO"}; unlimited cycles')
+    # Preserve a known good pin without needless restart.
+    try:
+        if verify_pin_current(region):return True
+    except Exception as e:log(f'Existing pin check failed: {e}')
+    # Remove old target before discovery. No automatic return to RU state.
+    clear_target(region)
+    STATE.unlink(missing_ok=True)
+    seen_exits=set()
+    cycle=0
+    while True:
+        cycle+=1
+        try:
+            # Give Psiphon an opportunity to discover new servers before snapshotting the DB.
+            docker_restart(wait)
+            time.sleep(5)
+            candidates=collect_candidates(region)
+        except Exception as exc:
+            log(f'Cannot collect candidates: {exc}; retry in 30s')
+            time.sleep(30)
+            continue
+        random.shuffle(candidates)
+        log(f'Cycle {cycle}: {len(candidates)} unique server IPs')
+        for i,candidate in enumerate(candidates,1):
+            server=candidate['server_ip'];expected=candidate['diagnostic']
+            log(f'Trying server {i}/{len(candidates)}: {server}, ID={expected}')
+            try:
+                apply_candidate(candidate,region)
+                exit_ip=docker_restart(wait)
+                actual=connected_id()
+                if actual!=expected:
+                    raise RuntimeError(f'Wrong server ID: expected {expected}, got {actual}')
+                # Do not spend time probing Google for an exit already rejected.
+                if exit_ip in seen_exits:
+                    log(f'Exit {exit_ip} already rejected in this search; skipping')
+                    continue
+                first,geo=probe()
+                if first!=exit_ip:raise RuntimeError(f'Exit IP changed: {exit_ip} -> {first}')
+                if geo=='RU':
+                    seen_exits.add(first)
+                    log(f'Rejected exit {first}: Google=RU')
+                    continue
+                # Double-check Google after a short delay, through the same SOCKS5 tunnel.
+                time.sleep(5)
+                second,geo2=probe()
+                if second!=first or geo2=='RU' or connected_id()!=expected:
+                    raise RuntimeError(f'Pin verification unstable: {second} Google={geo2}')
+                atomic_json(STATE,{'ip':first,'google_region':geo2,'region':region,'diagnostic_id':expected,'server_ip':server,'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+                log(f'PIN VERIFIED: exit={first} Google={geo2} server={server} ID={expected}')
+                return True
+            except Exception as exc:
+                log(f'Server {server} failed: {exc}')
+            time.sleep(delay)
+        log('All candidates exhausted. Refreshing discovery and repeating in 60s...')
+        clear_target(region)
+        try:docker_restart(wait)
+        except Exception as e:log(f'Discovery connection warning: {e}')
+        time.sleep(60)
+        # After a full cycle, the same exit could have been reclassified by Google.
+        seen_exits.clear()
 
-
-def monitor(region, interval, wait, delay):
-    log(
-        f'Monitor active: check every {interval}s, '
-        f'Psiphon region={region or "AUTO"}'
-    )
-
+def monitor(region,interval,wait,delay):
+    log(f'Monitor started: region={region or "AUTO"}, interval={interval}s')
     while True:
         try:
-            ip, geo = probe()
-
-            state = (
-                read_json(
-                    STATE_DIR / 'state.json', {}
-                ) or {}
-            )
-
-            if geo == 'RU':
-                log('Google=RU; confirming before rotation')
+            ip,geo=probe()
+            state=read_json(STATE,{}) or {}
+            config=read_json(CONFIG,{}) or {}
+            wrong_region=state.get('region')!=region
+            missing_pin=not state.get('ip') or not config.get('TargetServerEntry')
+            changed=(not missing_pin and (ip!=state.get('ip') or connected_id()!=state.get('diagnostic_id')))
+            if geo=='RU':
+                log('Google=RU; checking again before rotation')
                 time.sleep(15)
-
-                ip2, geo2 = probe()
-
-                if geo2 == 'RU':
-                    log(
-                        f'Confirmed RU on {ip2}; '
-                        'searching until success'
-                    )
-                    search(region, wait, delay)
-
-            elif state.get('ip') and ip != state['ip']:
-                log(
-                    f'Exit changed {state["ip"]} -> {ip}'
-                )
-
-                try:
-                    pin_current(ip, geo, region, wait)
-                except Exception as error:
-                    log(
-                        f'Could not pin changed exit: {error}'
-                    )
-                    search(region, wait, delay)
-
-            elif not state.get('ip'):
-                log('No verified pin state; searching for pin')
-                search(region, wait, delay)
-
-            else:
-                log('Healthy; no change needed')
-
-        except Exception as error:
-            log(
-                f'CHECK UNKNOWN / outage: {error} '
-                '(do not classify as RU)'
-            )
-
-            state = (
-                read_json(
-                    STATE_DIR / 'state.json', {}
-                ) or {}
-            )
-
+                _,confirm=probe()
+                if confirm=='RU':
+                    log('RU confirmed; switching to a different server')
+                    search(region,wait,delay)
+            elif wrong_region or missing_pin or changed:
+                log('No matching verified pin; starting controlled server selection')
+                search(region,wait,delay)
+            else:log('Healthy pinned SOCKS exit; unchanged')
+        except Exception as e:
+            log(f'CHECK UNKNOWN / outage: {e} (not treated as RU)')
+            state=read_json(STATE,{}) or {}
             if not state.get('ip'):
-                log(
-                    'No verified pinned exit: '
-                    'searching/recovering'
-                )
-                search(region, wait, delay)
-
+                try:search(region,wait,delay)
+                except Exception as inner:log(f'Search failed: {inner}')
         time.sleep(interval)
 
-
 def main():
-    parser = argparse.ArgumentParser(
-        description='Psiphon Auto-Pin Manager'
-    )
-
-    parser.add_argument(
-        'command',
-        choices=['check', 'search', 'monitor', 'status']
-    )
-
-    parser.add_argument('--region', default=None)
-    parser.add_argument('--interval', type=int, default=3600)
-    parser.add_argument('--wait', type=int, default=60)
-    parser.add_argument('--delay', type=int, default=12)
-
-    args = parser.parse_args()
-
-    settings = (
-        read_json(
-            STATE_DIR / 'settings.json', {}
-        ) or {}
-    )
-
-    region = (
-        args.region
-        if args.region is not None
-        else settings.get('region', '')
-    ).upper()
-
-    if region == 'AUTO':
-        region = ''
-
-    if region and not re.fullmatch('[A-Z]{2}', region):
-        parser.error('invalid --region')
-
-    if args.interval < 60 or args.wait < 10 or args.delay < 2:
-        parser.error(
-            'interval >= 60, wait >= 10, delay >= 2 required'
-        )
-
-    if args.command == 'status':
-        print(
-            json.dumps(
-                {
-                    'config': str(CONFIG),
-                    'region': region,
-                    'state': read_json(
-                        STATE_DIR / 'state.json', {}
-                    )
-                },
-                ensure_ascii=False,
-                indent=2
-            )
-        )
-        return 0
-
-    if args.command == 'check':
-        ip, geo = probe()
-        return 0 if geo != 'RU' else 2
-
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-
-    with open(STATE_DIR / 'lock', 'w') as lock:
-        try:
-            fcntl.flock(
-                lock,
-                fcntl.LOCK_EX | fcntl.LOCK_NB
-            )
-        except BlockingIOError:
-            raise RuntimeError(
-                'Another search/monitor is running'
-            )
-
-        if args.command == 'search':
-            search(region, args.wait, args.delay)
-        else:
-            monitor(
-                region,
-                args.interval,
-                args.wait,
-                args.delay
-            )
-
+    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.2')
+    ap.add_argument('command',choices=['check','search','monitor','status'])
+    ap.add_argument('--region',default=None)
+    ap.add_argument('--interval',type=int,default=3600)
+    ap.add_argument('--wait',type=int,default=75)
+    ap.add_argument('--delay',type=int,default=12)
+    args=ap.parse_args()
+    settings=read_json(DATA/'settings.json',{}) or {}
+    region=(args.region if args.region is not None else settings.get('region','')).upper()
+    if region=='AUTO':region=''
+    if region and not re.fullmatch('[A-Z]{2}',region):ap.error('invalid country')
+    if args.interval<60 or args.wait<20 or args.delay<2:ap.error('interval>=60 wait>=20 delay>=2')
+    if args.command=='status':
+        print(json.dumps({'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}'},indent=2));return 0
+    if args.command=='check':
+        _,geo=probe();return 0 if geo!='RU' else 2
+    DATA.mkdir(parents=True,exist_ok=True)
+    with (DATA/'lock').open('w') as f:
+        try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:raise RuntimeError('Another search/monitor is running')
+        if args.command=='search':search(region,args.wait,args.delay)
+        else:monitor(region,args.interval,args.wait,args.delay)
     return 0
 
-
-if __name__ == '__main__':
-    try:
-        sys.exit(main())
-
-    except KeyboardInterrupt:
-        log('Stopped by user')
-        sys.exit(130)
-
-    except Exception as error:
-        log(f'ERROR: {error}')
-        sys.exit(1)
-AUTOPIN_MANAGER_SOURCE
-
-chmod 755 "$APP/psiphon_autopin.py"
-
+if __name__=='__main__':
+    try:sys.exit(main())
+    except KeyboardInterrupt:log('Stopped');sys.exit(130)
+    except Exception as exc:log(f'FATAL: {exc}');sys.exit(1)
+PY_MANAGER
+chmod 700 "$APP/psiphon_autopin.py"
 python3 -m py_compile "$APP/psiphon_autopin.py"
-
-python3 - "$DATA/settings.json" "$REGION" <<'PYSETTINGS'
-import json
-import sys
-
-path, region = sys.argv[1:]
-
-with open(path, 'w') as f:
-    json.dump({'region': region}, f)
-PYSETTINGS
-
+python3 - "$DATA/settings.json" "$REGION" <<'SETTINGS'
+import json,sys
+with open(sys.argv[1],'w') as f:json.dump({'region':sys.argv[2]},f);f.write('\n')
+SETTINGS
 chmod 600 "$DATA/settings.json"
 
 cat > /etc/systemd/system/psiphon-autopin.service <<EOF
 [Unit]
-Description=Psiphon Auto-Pin region monitor and endless recovery
+Description=Forcus Psiphon Auto-Pin v3.2 server rotation and Google geo monitor
 Wants=network-online.target
 After=network-online.target docker.service
 Requires=docker.service
 StartLimitIntervalSec=0
-
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 $APP/psiphon_autopin.py monitor --region ${REGION:-AUTO} --interval 3600 --wait 60 --delay 12
+ExecStart=/usr/bin/python3 $APP/psiphon_autopin.py monitor --region ${REGION:-AUTO} --interval $INTERVAL --wait $WAIT --delay $DELAY
 Restart=always
 RestartSec=30
 NoNewPrivileges=true
-
 [Install]
 WantedBy=multi-user.target
 EOF
-
 systemctl daemon-reload
 systemctl enable psiphon-autopin.service
 systemctl restart psiphon-autopin.service
-
-echo '[OK] Psiphon Auto-Pin Manager v3.1 installed.'
-echo '[OK] Replay preferences disabled during rotation.'
-echo '[OK] Unlimited search enabled.'
-echo '[OK] Hourly region monitoring enabled.'
+printf '\n[OK] Forcus Psiphon Auto-Pin v3.2 installed\n'
+echo '[OK] Distinct Psiphon servers selected via TargetServerEntry.'
+echo '[OK] All IP and Google checks use local Psiphon SOCKS5h 127.0.0.1:40000.'
+echo '[OK] Hourly monitoring / unlimited search enabled.'
+echo 'Logs: journalctl -u psiphon-autopin -f'
+echo 'Status: python3 /opt/psiphon-autopin/psiphon_autopin.py status'
