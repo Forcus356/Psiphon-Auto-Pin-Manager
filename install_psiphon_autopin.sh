@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Forcus Psiphon Auto-Pin Manager v3.2
+# Forcus Psiphon Auto-Pin Manager v3.3
 # Author: https://github.com/Forcus356
 # Ubuntu/Debian x86_64
 set -Eeuo pipefail
@@ -11,14 +11,16 @@ trap 'echo "[ERROR] Line $LINENO; journalctl -u psiphon-autopin -n 80 --no-pager
 export DEBIAN_FRONTEND=noninteractive
 ROOT=/opt/vps-psiphon; CONF="$ROOT/config"; APP=/opt/psiphon-autopin
 DATA=/var/lib/psiphon-autopin; CONTAINER=vps-psiphon
-REGION=''; INTERVAL=3600; WAIT=75; DELAY=12
+REGION=''; INTERVAL=3600; WAIT=75; DELAY=12; SOCKS_PORT=''
+PORT_EXPLICIT=0
 while (($#)); do
     case "$1" in
         --region) REGION=${2:?Missing region}; shift 2 ;;
+        --port) SOCKS_PORT=${2:?Missing port}; PORT_EXPLICIT=1; shift 2 ;;
         --interval) INTERVAL=${2:?Missing interval}; shift 2 ;;
         --wait) WAIT=${2:?Missing wait}; shift 2 ;;
         --delay) DELAY=${2:?Missing delay}; shift 2 ;;
-        --help) echo 'Usage: install_psiphon_autopin.sh [--region DE|AUTO] [--interval 3600] [--wait 75] [--delay 12]'; exit 0 ;;
+        --help) echo 'Usage: install_psiphon_autopin.sh [--region DE|AUTO] [--port 40000] [--interval 3600] [--wait 75] [--delay 12]'; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -30,6 +32,22 @@ if [[ -z $REGION ]]; then
         echo 'Noninteractive install: specify --region DE' >&2; exit 2
     fi
 fi
+# On interactive installs, ask for a SOCKS5 port, with Enter accepting 40000.
+# The /dev/tty input works even with curl | sudo bash.
+if [[ -z $SOCKS_PORT ]]; then
+    if [[ -r /dev/tty ]]; then
+        read -r -p 'SOCKS5 port [40000]: ' SOCKS_PORT </dev/tty
+        SOCKS_PORT=${SOCKS_PORT:-40000}
+    else
+        SOCKS_PORT=40000
+    fi
+fi
+[[ $SOCKS_PORT =~ ^[0-9]+$ ]] || { echo 'Port must be numeric' >&2; exit 2; }
+SOCKS_PORT=$((10#$SOCKS_PORT))
+(( SOCKS_PORT >= 1024 && SOCKS_PORT <= 65534 )) || {
+    echo 'Choose SOCKS5 port 1024..65534 (HTTP uses port+1)' >&2; exit 2;
+}
+HTTP_PORT=$((SOCKS_PORT + 1))
 REGION=${REGION^^}
 [[ $REGION == AUTO || $REGION =~ ^[A-Z]{2}$ ]] || { echo 'Invalid country' >&2; exit 2; }
 [[ $INTERVAL =~ ^[0-9]+$ && $WAIT =~ ^[0-9]+$ && $DELAY =~ ^[0-9]+$ ]] || exit 2
@@ -37,39 +55,71 @@ REGION=${REGION^^}
 [[ $REGION == AUTO ]] && REGION=''
 mkdir -p "$ROOT" "$CONF" "$APP" "$DATA"
 chmod 700 "$DATA"
-echo "[INFO] Region=${REGION:-AUTO}; manager v3.2"
+echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v3.3"
 
 # Stop old writer before updating executable/config. This does not stop the VPN container.
 systemctl stop psiphon-autopin.service 2>/dev/null || true
 
-NEEDS=()
-for command in docker curl jq python3 column go ss; do
-    command -v "$command" >/dev/null 2>&1 || NEEDS+=("$command")
-done
-if ((${#NEEDS[@]})); then
+# Install only missing packages. Never replace Docker CE with Ubuntu docker.io.
+PACKAGES=()
+command -v curl >/dev/null 2>&1 || PACKAGES+=(curl)
+command -v jq >/dev/null 2>&1 || PACKAGES+=(jq)
+command -v python3 >/dev/null 2>&1 || PACKAGES+=(python3)
+command -v column >/dev/null 2>&1 || PACKAGES+=(bsdextrautils)
+command -v go >/dev/null 2>&1 || PACKAGES+=(golang-go)
+command -v ss >/dev/null 2>&1 || PACKAGES+=(iproute2)
+if ((${#PACKAGES[@]})); then
     apt-get update
-    apt-get install -y ca-certificates curl python3 jq util-linux bsdextrautils docker.io golang-go iproute2
+    apt-get install -y ca-certificates "${PACKAGES[@]}"
+fi
+if ! command -v docker >/dev/null 2>&1; then
+    apt-get update
+    if apt-cache show docker-ce 2>/dev/null | grep -q '^Package: docker-ce$'; then
+        apt-get install -y docker-ce docker-ce-cli containerd.io
+    else
+        apt-get install -y docker.io
+    fi
+else
+    echo "[OK] Using existing $(docker --version)"
 fi
 systemctl enable --now docker
+if ! docker info >/dev/null 2>&1; then
+    echo '[ERROR] Docker daemon not responding' >&2; exit 1
+fi
+
+# Check both listeners when creating a container or changing its ports.
+port_occupied() {
+    ss -ltnH | awk '{print $4}' | grep -Eq "(^|:)$1$"
+}
 
 if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
     [[ -f $CONF/psiphon.config ]] || { echo "Missing $CONF/psiphon.config" >&2; exit 1; }
     echo '[INFO] Existing Psiphon container preserved.'
+    CURRENT_SOCKS_PORT=$(python3 - "$CONF/psiphon.config" <<'PYOLDPORT'
+import json,sys
+print(json.load(open(sys.argv[1])).get('LocalSocksProxyPort',40000))
+PYOLDPORT
+)
+    if [[ "$CURRENT_SOCKS_PORT" != "$SOCKS_PORT" ]]; then
+        if port_occupied "$SOCKS_PORT" || port_occupied "$HTTP_PORT"; then
+            echo "[ERROR] New SOCKS/HTTP port $SOCKS_PORT/$HTTP_PORT occupied" >&2; exit 1
+        fi
+    fi
     docker start "$CONTAINER" >/dev/null || true
 else
     [[ ! -e $CONF/psiphon.config ]] || { echo 'Config exists but container missing; refusing overwrite.' >&2; exit 1; }
-    if ss -ltnH | awk '{print $4}' | grep -Eq '(^|:)40000$'; then
-        echo 'SOCKS port 40000 already occupied' >&2; exit 1
+    if port_occupied "$SOCKS_PORT" || port_occupied "$HTTP_PORT"; then
+        echo "SOCKS/HTTP port $SOCKS_PORT/$HTTP_PORT already occupied" >&2; exit 1
     fi
     echo '[INFO] Bootstrapping Psiphon...'
     docker pull swarupsengupta2007/psiphon:latest
     docker run --rm --entrypoint cat swarupsengupta2007/psiphon:latest /etc/psiphon/psiphon.config > "$CONF/psiphon.config"
     chmod 600 "$CONF/psiphon.config"
-    python3 - "$CONF/psiphon.config" "$REGION" <<'CONFIG_INIT'
+    python3 - "$CONF/psiphon.config" "$REGION" "$SOCKS_PORT" "$HTTP_PORT" <<'CONFIG_INIT'
 import json,sys
-p,r=sys.argv[1:]
+p,r,socks,http=sys.argv[1:]
 c=json.load(open(p))
-c.update(EgressRegion=r,LocalSocksProxyPort=40000,LocalSocksProxyListenAddress='127.0.0.1',LocalHttpProxyPort=40001,LocalHttpProxyListenAddress='127.0.0.1',TunnelPoolSize=1,EmitDiagnosticNotices=True,DisableReplay=True)
+c.update(EgressRegion=r,LocalSocksProxyPort=int(socks),LocalSocksProxyListenAddress='127.0.0.1',LocalHttpProxyPort=int(http),LocalHttpProxyListenAddress='127.0.0.1',TunnelPoolSize=1,EmitDiagnosticNotices=True,DisableReplay=True)
 with open(p,'w') as f: json.dump(c,f,indent=2); f.write('\n')
 CONFIG_INIT
     tree=$(mktemp)
@@ -97,9 +147,32 @@ DOCKERFILE
     echo '[OK] Created Psiphon container.'
 fi
 
+# Update the region on re-install. Invalidate stale pin state when region changes.
+SYNC_CHANGED=$(python3 - "$CONF/psiphon.config" "$DATA/state.json" "$REGION" "$SOCKS_PORT" "$HTTP_PORT" <<'SYNC_REGION'
+import json,sys,os,shutil,datetime
+p,s,r,socks,http=sys.argv[1:];c=json.load(open(p))
+changed=(c.get('EgressRegion','')!=r or c.get('LocalSocksProxyPort')!=int(socks) or c.get('LocalHttpProxyPort')!=int(http))
+if changed:
+    shutil.copy2(p,p+'.before-region-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+    c['EgressRegion']=r
+    c['LocalSocksProxyPort']=int(socks)
+    c['LocalSocksProxyListenAddress']='127.0.0.1'
+    c['LocalHttpProxyPort']=int(http)
+    c['LocalHttpProxyListenAddress']='127.0.0.1'
+    c.pop('TargetServerEntry',None)
+    with open(p,'w') as f:json.dump(c,f,indent=2);f.write('\n')
+    if os.path.isfile(s):os.unlink(s)
+    print('changed')
+SYNC_REGION
+)
+if [[ "$SYNC_CHANGED" == changed ]]; then
+    echo "[INFO] Region or proxy port changed: restarting Psiphon"
+    docker restart "$CONTAINER" >/dev/null
+fi
+
 # Recover bootstrap fields if an existing installation does not respond through SOCKS5.
 # Check ONLY through the proxy. A failure must never fall back to a direct IP probe.
-if ! curl -4 -fsS --max-time 15 --noproxy '' --proxy socks5h://127.0.0.1:40000 https://api.ipify.org >/dev/null 2>&1; then
+if ! curl -4 -fsS --max-time 15 --noproxy '' --proxy socks5h://127.0.0.1:${SOCKS_PORT} https://api.ipify.org >/dev/null 2>&1; then
     echo '[INFO] Checking bootstrap fields (SOCKS5 not yet responding)...'
     docker pull swarupsengupta2007/psiphon:latest
     template=$(mktemp)
@@ -118,19 +191,6 @@ BOOTSTRAP
     rm -f "$template"
     docker restart "$CONTAINER" >/dev/null
 fi
-
-# Update the region on re-install. Invalidate stale pin state when region changes.
-python3 - "$CONF/psiphon.config" "$DATA/state.json" "$REGION" <<'SYNC_REGION'
-import json,sys,os,shutil,datetime
-p,s,r=sys.argv[1:];c=json.load(open(p))
-if c.get('EgressRegion','')!=r:
-    shutil.copy2(p,p+'.before-region-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
-    c['EgressRegion']=r
-    c.pop('TargetServerEntry',None)
-    with open(p,'w') as f:json.dump(c,f,indent=2);f.write('\n')
-    if os.path.isfile(s):os.unlink(s)
-    print('[INFO] Country changed; old pin invalidated.')
-SYNC_REGION
 
 # Google region classifier from Davoyan. Force its proxy requests to use remote SOCKS DNS.
 curl -fLsS --retry 3 https://raw.githubusercontent.com/Davoyan/ipregion/main/ipregion.sh -o "$APP/ipregion.sh"
@@ -220,7 +280,7 @@ fi
 
 cat > "$APP/psiphon_autopin.py" <<'PY_MANAGER'
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v3.2: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v3.3: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import datetime as dt
 import fcntl
@@ -240,7 +300,7 @@ BASE=Path('/opt/psiphon-autopin')
 DATA=Path('/var/lib/psiphon-autopin')
 CONFIG=Path('/opt/vps-psiphon/config/psiphon.config')
 CONTAINER='vps-psiphon'
-PROXY='127.0.0.1:40000'
+PROXY='127.0.0.1:40000'  # Updated from settings / --port in main()
 STATE=DATA/'state.json'
 
 def log(message):
@@ -454,15 +514,20 @@ def monitor(region,interval,wait,delay):
         time.sleep(interval)
 
 def main():
-    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.2')
+    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.3')
     ap.add_argument('command',choices=['check','search','monitor','status'])
     ap.add_argument('--region',default=None)
+    ap.add_argument('--port',type=int,default=None)
     ap.add_argument('--interval',type=int,default=3600)
     ap.add_argument('--wait',type=int,default=75)
     ap.add_argument('--delay',type=int,default=12)
     args=ap.parse_args()
     settings=read_json(DATA/'settings.json',{}) or {}
     region=(args.region if args.region is not None else settings.get('region','')).upper()
+    global PROXY
+    port=args.port if args.port is not None else int(settings.get('port',40000))
+    if not 1024 <= port <= 65534:ap.error('port must be 1024..65534')
+    PROXY=f'127.0.0.1:{port}'
     if region=='AUTO':region=''
     if region and not re.fullmatch('[A-Z]{2}',region):ap.error('invalid country')
     if args.interval<60 or args.wait<20 or args.delay<2:ap.error('interval>=60 wait>=20 delay>=2')
@@ -485,22 +550,22 @@ if __name__=='__main__':
 PY_MANAGER
 chmod 700 "$APP/psiphon_autopin.py"
 python3 -m py_compile "$APP/psiphon_autopin.py"
-python3 - "$DATA/settings.json" "$REGION" <<'SETTINGS'
+python3 - "$DATA/settings.json" "$REGION" "$SOCKS_PORT" <<'SETTINGS'
 import json,sys
-with open(sys.argv[1],'w') as f:json.dump({'region':sys.argv[2]},f);f.write('\n')
+with open(sys.argv[1],'w') as f:json.dump({'region':sys.argv[2],'port':int(sys.argv[3])},f);f.write('\n')
 SETTINGS
 chmod 600 "$DATA/settings.json"
 
 cat > /etc/systemd/system/psiphon-autopin.service <<EOF
 [Unit]
-Description=Forcus Psiphon Auto-Pin v3.2 server rotation and Google geo monitor
+Description=Forcus Psiphon Auto-Pin v3.3 server rotation and Google geo monitor
 Wants=network-online.target
 After=network-online.target docker.service
 Requires=docker.service
 StartLimitIntervalSec=0
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 $APP/psiphon_autopin.py monitor --region ${REGION:-AUTO} --interval $INTERVAL --wait $WAIT --delay $DELAY
+ExecStart=/usr/bin/python3 $APP/psiphon_autopin.py monitor --region ${REGION:-AUTO} --port $SOCKS_PORT --interval $INTERVAL --wait $WAIT --delay $DELAY
 Restart=always
 RestartSec=30
 NoNewPrivileges=true
@@ -510,9 +575,9 @@ EOF
 systemctl daemon-reload
 systemctl enable psiphon-autopin.service
 systemctl restart psiphon-autopin.service
-printf '\n[OK] Forcus Psiphon Auto-Pin v3.2 installed\n'
+printf '\n[OK] Forcus Psiphon Auto-Pin v3.3 installed\n'
 echo '[OK] Distinct Psiphon servers selected via TargetServerEntry.'
-echo '[OK] All IP and Google checks use local Psiphon SOCKS5h 127.0.0.1:40000.'
-echo '[OK] Hourly monitoring / unlimited search enabled.'
+echo "[OK] SOCKS5h: 127.0.0.1:$SOCKS_PORT (Google and IP checks through proxy)."
+echo "[OK] Monitoring every ${INTERVAL}s / unlimited search enabled."
 echo 'Logs: journalctl -u psiphon-autopin -f'
 echo 'Status: python3 /opt/psiphon-autopin/psiphon_autopin.py status'
