@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Forcus Psiphon Auto-Pin Manager v3.5.0
+# Forcus Psiphon Auto-Pin Manager v3.5.1
 # Author: https://github.com/Forcus356
 # Ubuntu/Debian x86_64
 set -Eeuo pipefail
@@ -109,7 +109,7 @@ REGION=${REGION^^}
 [[ $REGION == AUTO ]] && REGION=''
 mkdir -p "$ROOT" "$CONF" "$APP" "$DATA"
 chmod 700 "$DATA"
-echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v3.5.0; backend=$BACKEND"
+echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v3.5.1; backend=$BACKEND"
 
 # Monitor is stopped after installation ownership checks below.
 
@@ -231,7 +231,10 @@ import json,os,sys,tempfile
 p,region=sys.argv[1:];st=os.stat(p)
 with open(p) as f:c=json.load(f)
 c.update(EgressRegion=region,ListenInterface='any',LocalSocksProxyPort=1080,
-         LocalHttpProxyPort=8080,TunnelPoolSize=1,EmitDiagnosticNotices=True,DisableReplay=True)
+         LocalHttpProxyPort=8080,TunnelPoolSize=1,EmitDiagnosticNotices=True,DisableReplay=True,
+         DisableTactics=True,LimitTunnelProtocols=['SSH','OSSH','QUIC-OSSH','TLS-OSSH',
+         'SHADOWSOCKS-OSSH','UNFRONTED-MEEK-OSSH','UNFRONTED-MEEK-HTTPS-OSSH',
+         'UNFRONTED-MEEK-SESSION-TICKET-OSSH','FRONTED-MEEK-OSSH','FRONTED-MEEK-HTTP-OSSH'])
 c.pop('LocalSocksProxyListenAddress',None);c.pop('LocalHttpProxyListenAddress',None)
 with tempfile.NamedTemporaryFile('w',dir=os.path.dirname(p),delete=False) as f:
     json.dump(c,f,indent=2);f.write('\n');name=f.name
@@ -419,7 +422,7 @@ if ! curl -4 -fsS --max-time 15 --noproxy '' --proxy socks5h://127.0.0.1:${SOCKS
     docker pull swarupsengupta2007/psiphon:latest
     template=$(mktemp)
     docker run --rm --entrypoint cat swarupsengupta2007/psiphon:latest /etc/psiphon/psiphon.config > "$template"
-    python3 - "$CONF/psiphon.config" "$template" <<'BOOTSTRAP'
+    BOOTSTRAP_CHANGED=$(python3 - "$CONF/psiphon.config" "$template" <<'BOOTSTRAP'
 import json,sys,shutil,datetime
 p,t=sys.argv[1:]; a=json.load(open(p)); b=json.load(open(t))
 keys=('RemoteServerListURLs','RemoteServerListSignaturePublicKey','ObfuscatedServerListRootURLs','ObfuscatedServerListSignaturePublicKey','ServerEntrySignaturePublicKey','SponsorId','PropagationChannelId')
@@ -428,10 +431,16 @@ if missing:
     shutil.copy2(p,p+'.bootstrap-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
     for k in missing:a[k]=b[k]
     with open(p,'w') as f:json.dump(a,f,indent=2);f.write('\n')
-print('Bootstrap fields added:',missing)
+print(','.join(missing))
 BOOTSTRAP
+)
     rm -f "$template"
-    if [[ $BACKEND == vps-psiphon ]]; then systemctl restart vps-psiphon.service; else docker restart "$CONTAINER" >/dev/null; fi
+    if [[ -n $BOOTSTRAP_CHANGED ]]; then
+        echo "[INFO] Bootstrap fields added: $BOOTSTRAP_CHANGED"
+        if [[ $BACKEND == vps-psiphon ]]; then systemctl restart vps-psiphon.service; else docker restart "$CONTAINER" >/dev/null; fi
+    else
+        echo '[INFO] Bootstrap complete; preserving the starting tunnel without another restart.'
+    fi
 fi
 
 # Google region classifier from Davoyan. Force its proxy requests to use remote SOCKS DNS.
@@ -585,7 +594,7 @@ python3 -m py_compile "$APP/gemini_probe.py"
 
 cat > "$APP/psiphon_autopin.py" <<'PY_MANAGER'
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v3.5.0: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v3.5.1: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import datetime as dt
 import fcntl
@@ -765,12 +774,27 @@ def evaluate_exit(region, gemini, mb, strict=False):
     return ip,geo,verdict,speed,reason
 
 def adopt_current(region,gemini,mb,strict,observed=None):
-    """Leave an already healthy connection alone; do not claim it's pinned to a DB entry."""
+    """Keep a healthy tunnel; recover an existing target only against the cached DB entry."""
     config=read_json(CONFIG,{}) or {}
-    if config.get('TargetServerEntry'):return False
     ip,geo,verdict,speed,reason = observed if observed is not None else evaluate_exit(region,gemini,mb,strict)
     if reason:return False
     diag=connected_id()
+    if config.get('TargetServerEntry'):
+        # Search can be interrupted after writing a target but before saving its state.
+        # Require both the cached credential blob and the live diagnostic ID to match.
+        row=candidate_for_connected_server(diag,region)
+        if not row or row['encoded']!=config['TargetServerEntry']:
+            log('Healthy targeted tunnel has no matching cached entry; pin remains unverified')
+            return False
+        if socks_ip()!=ip or connected_id()!=diag:
+            raise RuntimeError('Targeted exit changed during pin recovery')
+        atomic_json(STATE,{'region':region,'ip':ip,'google_region':geo,
+            'diagnostic_id':diag,'server_ip':row['server_ip'],'gemini':verdict,
+            'speed_kib_s':speed,'adopted_unpinned':False,
+            'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+        log(f'RECOVERED VERIFIED PIN: exit={ip} Google={geo} Gemini={verdict} '
+            f'server={row["server_ip"]} ID={diag}; no restart')
+        return True
     atomic_json(STATE,{'region':region,'ip':ip,'google_region':geo,
         'diagnostic_id':diag,'server_ip':None,'gemini':verdict,
         'speed_kib_s':speed,'adopted_unpinned':True,
@@ -856,13 +880,17 @@ def pin_prepared_verification(region,ip,geo,diag,reason,state):
         f'expected={state.get("ip")}/{state.get("diagnostic_id")}')
     return False
 
-def docker_restart(wait):
-    tunnel_action('restart')
+def wait_ready(wait):
+    """Wait for an existing tunnel without restarting a potentially healthy pin."""
     deadline=time.monotonic()+wait;error='unknown'
     while time.monotonic()<deadline:
         try:return socks_ip()
         except Exception as exc:error=str(exc);time.sleep(2)
     raise RuntimeError(f'Psiphon not ready in {wait}s: {error}')
+
+def docker_restart(wait):
+    tunnel_action('restart')
+    return wait_ready(wait)
 
 def collect_candidates(region):
     # BoltDB is read only with the container stopped; always start it again.
@@ -880,11 +908,11 @@ def collect_candidates(region):
         tunnel_action('start')
 
 def apply_candidate(candidate,region):
-    change_config({'EgressRegion':region,'TargetServerEntry':candidate['encoded'],'TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True,'DisableTactics':False})
+    change_config({'EgressRegion':region,'TargetServerEntry':candidate['encoded'],'TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True})
 
 def clear_target(region):
     update_region_env(region)
-    change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True,'DisableTactics':False})
+    change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True})
 
 def verify_pin_current(region,gemini=False,mb=0,strict=False):
     state=read_json(STATE,{}) or {}
@@ -972,7 +1000,10 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
 def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
     log(f'Monitor v3.5: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
     failures=0
+    try:wait_ready(wait)
+    except Exception as exc:log(f'Startup readiness pending: {exc}')
     while True:
+        next_check=interval
         try:
             ip,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
             state=read_json(STATE,{}) or {}
@@ -1018,21 +1049,29 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
                     + ('adopted (not pinned)' if state.get('adopted_unpinned') else 'pinned'))
         except Exception as exc:
             failures+=1
+            # An outage must not postpone retries for a full hourly health interval.
+            next_check=min(interval,30)
             log(f'UNKNOWN/OUTAGE {failures}/{threshold}: {exc}; no RU inference')
             if failures>=threshold:
                 log('Consecutive failures reached threshold; recovering connection')
                 try:
-                    docker_restart(wait)
-                    # Only run rotation if the restarted tunnel is still unusable.
-                    ip,geo,verdict,_,reason=evaluate_exit(region,gemini,0,strict)
-                    if reason:
+                    try:
+                        docker_restart(wait)
+                    except Exception as restart_error:
+                        # A dead TargetServerEntry must not be retried forever.
+                        log(f'Restart could not restore SOCKS: {restart_error}; discovering another server')
                         search(region,wait,delay,gemini,mb,strict)
                     else:
-                        log(f'Recovered without full search: {ip} Google={geo} Gemini={verdict}')
+                        # A failed Google classifier is not proof of a bad exit.
+                        ip,geo,verdict,_,reason=evaluate_exit(region,gemini,0,strict)
+                        if reason:
+                            search(region,wait,delay,gemini,mb,strict)
+                        else:
+                            log(f'Recovered without full search: {ip} Google={geo} Gemini={verdict}')
                 except Exception as e:
                     log(f'Recovery incomplete: {e}; defer next attempt')
                 failures=0
-        time.sleep(interval)
+        time.sleep(next_check)
 
 def main():
     ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.5')
@@ -1134,7 +1173,7 @@ TUNNEL_DEP=''
 if [[ $BACKEND == vps-psiphon ]]; then TUNNEL_DEP=vps-psiphon.service; fi
 cat > /etc/systemd/system/psiphon-autopin.service <<EOF
 [Unit]
-Description=Forcus Psiphon Auto-Pin v3.5.0 server rotation and Google geo monitor
+Description=Forcus Psiphon Auto-Pin v3.5.1 server rotation and Google geo monitor
 Wants=network-online.target $TUNNEL_DEP
 After=network-online.target docker.service $TUNNEL_DEP
 Requires=docker.service
@@ -1167,7 +1206,7 @@ fi
 systemctl daemon-reload
 systemctl enable psiphon-autopin.service
 systemctl restart psiphon-autopin.service
-printf '\n[OK] Forcus Psiphon Auto-Pin v3.5.0 installed\n'
+printf '\n[OK] Forcus Psiphon Auto-Pin v3.5.1 installed\n'
 echo '[OK] Existing healthy unpinned exits are retained; targeted pinning remains available.'
 echo "[OK] Gemini checks: $GEMINI_CHECK; optional throughput sample: ${PROBE_MB} MiB; strict region: $STRICT_REGION."
 echo "[OK] SOCKS5h: 127.0.0.1:$SOCKS_PORT (Google and IP checks through proxy)."

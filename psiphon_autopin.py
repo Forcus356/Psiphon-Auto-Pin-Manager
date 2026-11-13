@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v3.5.0: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v3.5.1: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import datetime as dt
 import fcntl
@@ -179,12 +179,27 @@ def evaluate_exit(region, gemini, mb, strict=False):
     return ip,geo,verdict,speed,reason
 
 def adopt_current(region,gemini,mb,strict,observed=None):
-    """Leave an already healthy connection alone; do not claim it's pinned to a DB entry."""
+    """Keep a healthy tunnel; recover an existing target only against the cached DB entry."""
     config=read_json(CONFIG,{}) or {}
-    if config.get('TargetServerEntry'):return False
     ip,geo,verdict,speed,reason = observed if observed is not None else evaluate_exit(region,gemini,mb,strict)
     if reason:return False
     diag=connected_id()
+    if config.get('TargetServerEntry'):
+        # Search can be interrupted after writing a target but before saving its state.
+        # Require both the cached credential blob and the live diagnostic ID to match.
+        row=candidate_for_connected_server(diag,region)
+        if not row or row['encoded']!=config['TargetServerEntry']:
+            log('Healthy targeted tunnel has no matching cached entry; pin remains unverified')
+            return False
+        if socks_ip()!=ip or connected_id()!=diag:
+            raise RuntimeError('Targeted exit changed during pin recovery')
+        atomic_json(STATE,{'region':region,'ip':ip,'google_region':geo,
+            'diagnostic_id':diag,'server_ip':row['server_ip'],'gemini':verdict,
+            'speed_kib_s':speed,'adopted_unpinned':False,
+            'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+        log(f'RECOVERED VERIFIED PIN: exit={ip} Google={geo} Gemini={verdict} '
+            f'server={row["server_ip"]} ID={diag}; no restart')
+        return True
     atomic_json(STATE,{'region':region,'ip':ip,'google_region':geo,
         'diagnostic_id':diag,'server_ip':None,'gemini':verdict,
         'speed_kib_s':speed,'adopted_unpinned':True,
@@ -270,13 +285,17 @@ def pin_prepared_verification(region,ip,geo,diag,reason,state):
         f'expected={state.get("ip")}/{state.get("diagnostic_id")}')
     return False
 
-def docker_restart(wait):
-    tunnel_action('restart')
+def wait_ready(wait):
+    """Wait for an existing tunnel without restarting a potentially healthy pin."""
     deadline=time.monotonic()+wait;error='unknown'
     while time.monotonic()<deadline:
         try:return socks_ip()
         except Exception as exc:error=str(exc);time.sleep(2)
     raise RuntimeError(f'Psiphon not ready in {wait}s: {error}')
+
+def docker_restart(wait):
+    tunnel_action('restart')
+    return wait_ready(wait)
 
 def collect_candidates(region):
     # BoltDB is read only with the container stopped; always start it again.
@@ -294,11 +313,11 @@ def collect_candidates(region):
         tunnel_action('start')
 
 def apply_candidate(candidate,region):
-    change_config({'EgressRegion':region,'TargetServerEntry':candidate['encoded'],'TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True,'DisableTactics':False})
+    change_config({'EgressRegion':region,'TargetServerEntry':candidate['encoded'],'TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True})
 
 def clear_target(region):
     update_region_env(region)
-    change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True,'DisableTactics':False})
+    change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True})
 
 def verify_pin_current(region,gemini=False,mb=0,strict=False):
     state=read_json(STATE,{}) or {}
@@ -386,7 +405,10 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
 def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
     log(f'Monitor v3.5: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
     failures=0
+    try:wait_ready(wait)
+    except Exception as exc:log(f'Startup readiness pending: {exc}')
     while True:
+        next_check=interval
         try:
             ip,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
             state=read_json(STATE,{}) or {}
@@ -432,21 +454,29 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
                     + ('adopted (not pinned)' if state.get('adopted_unpinned') else 'pinned'))
         except Exception as exc:
             failures+=1
+            # An outage must not postpone retries for a full hourly health interval.
+            next_check=min(interval,30)
             log(f'UNKNOWN/OUTAGE {failures}/{threshold}: {exc}; no RU inference')
             if failures>=threshold:
                 log('Consecutive failures reached threshold; recovering connection')
                 try:
-                    docker_restart(wait)
-                    # Only run rotation if the restarted tunnel is still unusable.
-                    ip,geo,verdict,_,reason=evaluate_exit(region,gemini,0,strict)
-                    if reason:
+                    try:
+                        docker_restart(wait)
+                    except Exception as restart_error:
+                        # A dead TargetServerEntry must not be retried forever.
+                        log(f'Restart could not restore SOCKS: {restart_error}; discovering another server')
                         search(region,wait,delay,gemini,mb,strict)
                     else:
-                        log(f'Recovered without full search: {ip} Google={geo} Gemini={verdict}')
+                        # A failed Google classifier is not proof of a bad exit.
+                        ip,geo,verdict,_,reason=evaluate_exit(region,gemini,0,strict)
+                        if reason:
+                            search(region,wait,delay,gemini,mb,strict)
+                        else:
+                            log(f'Recovered without full search: {ip} Google={geo} Gemini={verdict}')
                 except Exception as e:
                     log(f'Recovery incomplete: {e}; defer next attempt')
                 failures=0
-        time.sleep(interval)
+        time.sleep(next_check)
 
 def main():
     ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.5')
