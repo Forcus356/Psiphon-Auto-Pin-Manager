@@ -1,222 +1,128 @@
-#!/usr/bin/env python3
-"""Psiphon Auto-Pin Manager. Requires existing Docker Psiphon setup."""
-import argparse, datetime, ipaddress, json, os, re, shutil, subprocess, tempfile, time
-from pathlib import Path
+                if actual!=expected:
+                    raise RuntimeError(f'Wrong server ID: expected {expected}, got {actual}')
+                # Do not spend time probing Google for an exit already rejected.
+                if exit_ip in seen_exits:
+                    log(f'Exit {exit_ip} already rejected in this search; skipping')
+                    continue
+                first,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
+                if first!=exit_ip:raise RuntimeError(f'Exit IP changed: {exit_ip} -> {first}')
+                if reason:
+                    seen_exits.add(first)
+                    log(f'Rejected exit {first}: {reason}')
+                    continue
+                # Recheck IP/geo, without an unnecessary second Gemini request.
+                time.sleep(5)
+                second,geo2=probe()
+                if second!=first or geo2=='RU' or (strict and region and geo2!=region) or connected_id()!=expected:
+                    raise RuntimeError(f'Pin verification unstable: {second} Google={geo2}')
+                atomic_json(STATE,{'ip':first,'google_region':geo2,'region':region,'diagnostic_id':expected,
+                                   'server_ip':server,'gemini':verdict,'speed_kib_s':speed,
+                                   'adopted_unpinned':False,'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+                log(f'PIN VERIFIED: exit={first} Google={geo2} Gemini={verdict} server={server} ID={expected}')
+                return True
+            except Exception as exc:
+                log(f'Server {server} failed: {exc}')
+            time.sleep(delay)
+        log('All candidates exhausted. Refreshing discovery and repeating in 60s...')
+        clear_target(region)
+        try:docker_restart(wait)
+        except Exception as e:log(f'Discovery connection warning: {e}')
+        time.sleep(60)
+        # After a full cycle, the same exit could have been reclassified by Google.
+        seen_exits.clear()
 
-UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
-
-def cmd(*args, timeout=45, check=True):
-    p=subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    if check and p.returncode: raise RuntimeError(f'{args[0]} failed: {p.stderr[-350:]}')
-    return p.stdout
-
-def curl(url, proxy, timeout=18):
-    return cmd('curl','-4','-fsSL','--compressed','--max-time',str(timeout),'--proxy',f'socks5h://{proxy}', '-A',UA,'-H','Accept-Language: en-US,en;q=0.9',url,timeout=timeout+5)
-
-def exit_ip(proxy):
-    ip=curl('https://api.ipify.org',proxy).strip()
-    ipaddress.ip_address(ip)
-    return ip
-
-def google_region(proxy):
-    """Use Davoyan/ipregion JSON output as the authoritative Google classification."""
-    script = Path('/opt/psiphon-autopin/ipregion.sh')
-    if not script.is_file():
-        raise RuntimeError('Install Davoyan/ipregion at /opt/psiphon-autopin/ipregion.sh first')
-    output = cmd('bash', str(script), '--proxy', proxy, '--ipv4', '--group', 'custom', '--json',
-                 timeout=180)
-    report = json.loads(output)
-    matches = [r.get('ipv4') for r in report.get('results', {}).get('custom', [])
-               if r.get('service') == 'Google']
-    if len(matches) != 1 or not re.fullmatch(r'[A-Z]{2}', str(matches[0])):
-        raise RuntimeError(f'ipregion Google result not a country: {matches!r}')
-    return matches[0]
-
-def check(proxy):
-    ip1=exit_ip(proxy)
-    region=google_region(proxy)
-    ip2=exit_ip(proxy)
-    if ip1!=ip2: raise RuntimeError(f'Exit IP changed during test: {ip1} -> {ip2}')
-    return ip1,region
-
-def latest_diagnostic(container):
-    logs=cmd('docker','logs','--tail','3000',container)
-    ids=[]
-    for line in logs.splitlines():
-        try: obj=json.loads(line)
-        except ValueError: continue
-        if obj.get('noticeType')=='ServerTimestamp':
-            v=obj.get('data',{}).get('diagnosticID','')
-            if re.fullmatch(r'[A-Za-z0-9+/]{8}',v): ids.append(v)
-    if not ids: raise RuntimeError('No valid ServerTimestamp diagnosticID in Docker logs')
-    return ids[-1]
-
-def get_entry(db, diagnostic, region):
-    raw=db.read_bytes().decode('utf-8',errors='replace')
-    decoder=json.JSONDecoder(); matches=[]
-    for m in re.finditer(r'\{',raw):
-        try: entry,end=decoder.raw_decode(raw,m.start())
-        except ValueError: continue
-        if not isinstance(entry,dict): continue
-        if not str(entry.get('tag','')).startswith(diagnostic): continue
-        if not entry.get('ipAddress') or not entry.get('capabilities'): continue
-        if '\ufffd' in raw[m.start():end]: continue
-        if region and entry.get('region')!=region: continue
-        matches.append(entry)
-    if not matches: raise RuntimeError('No matching server entry in BoltDB; refusing to pin')
-    if len({e['ipAddress'] for e in matches})!=1: raise RuntimeError('Ambiguous server entries; refusing to pin')
-    return max(matches,key=lambda e:int(e.get('configurationVersion',0)))
-
-def save_config(path, changes):
-    original=path.stat(); cfg=json.loads(path.read_text()); cfg.update(changes)
-    backup=path.with_name(path.name+'.backup-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
-    shutil.copy2(path,backup)
-    tmp=None
-    try:
-        with tempfile.NamedTemporaryFile(mode='w',dir=path.parent,delete=False) as f:
-            tmp=f.name; json.dump(cfg,f,indent=2); f.write('\n'); f.flush(); os.fsync(f.fileno())
-        os.chown(tmp,original.st_uid,original.st_gid)
-        os.chmod(tmp,original.st_mode & 0o777)
-        os.replace(tmp,path)
-    finally:
-        if tmp and os.path.exists(tmp): os.unlink(tmp)
-    return backup
-
-def restart(container,wait):
-    cmd('docker','restart',container,timeout=90)
-    time.sleep(wait)
-
-def log(msg): print(datetime.datetime.now().isoformat(timespec='seconds'),msg,flush=True)
-
-COUNTRIES = [
-    ('SE', 'Швеция'), ('DE', 'Германия'), ('NL', 'Нидерланды'),
-    ('PL', 'Польша'), ('FI', 'Финляндия'), ('FR', 'Франция'),
-    ('GB', 'Великобритания'), ('US', 'США'), ('CH', 'Швейцария'),
-    ('CZ', 'Чехия'),
-]
-
-def choose_region(arg_region, settings_path, action):
-    if arg_region is not None:
-        region = arg_region.upper()
-    else:
-        saved = None
+def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
+    log(f'Monitor v3.4: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
+    failures=0
+    while True:
         try:
-            saved = json.loads(settings_path.read_text()).get('region')
-        except (OSError, ValueError, AttributeError):
-            pass
-        if action == 'check':
-            return saved or ''
-        if not os.isatty(0):
-            if saved is None:
-                raise RuntimeError('Non-interactive run: specify --region CODE or select a region interactively first')
-            return saved
-        print('\n=== PSIPHON AUTO-PIN: ВЫБОР СТРАНЫ ===')
-        for i, (code, name) in enumerate(COUNTRIES, 1):
-            print(f' {i:2}. {name:18} ({code})')
-        print(' 11. Другая страна (двухбуквенный код)')
-        print(' 12. Автоматический выбор Psiphon')
-        if saved is not None:
-            print(f' Сохранённый выбор: {saved or "AUTO"} (Enter — оставить)')
-        while True:
-            answer = input('Выберите номер, код страны или Enter: ').strip().upper()
-            if not answer and saved is not None:
-                region = saved
-                break
-            if answer == '12' or answer == 'AUTO':
-                region = ''
-                break
-            if answer == '11':
-                answer = input('Код страны (например, AT): ').strip().upper()
-            if answer.isdigit() and 1 <= int(answer) <= len(COUNTRIES):
-                region = COUNTRIES[int(answer)-1][0]
-                break
-            if re.fullmatch(r'[A-Z]{2}', answer):
-                region = answer
-                break
-            print('Некорректный выбор. Укажите номер или двухбуквенный код.')
-    if region not in ('', 'AUTO') and not re.fullmatch(r'[A-Z]{2}', region):
-        raise ValueError('Region must be a two-letter code or AUTO')
-    region = '' if region == 'AUTO' else region
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(json.dumps({'region': region}, ensure_ascii=False, indent=2) + '\n')
-    print(f'Выбран регион Psiphon: {region or "AUTO"}', flush=True)
-    return region
+            ip,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
+            state=read_json(STATE,{}) or {}
+            config=read_json(CONFIG,{}) or {}
+            diag=connected_id()
+            changed=bool(state) and (ip!=state.get('ip') or diag!=state.get('diagnostic_id'))
+            if reason:
+                log(f'Bad exit: {reason}; verifying before rotation')
+                # Confirm decisive refusals to avoid spurious reboots.
+                time.sleep(10)
+                ip2,geo2,verdict2,_,reason2=evaluate_exit(region,gemini,0,strict)
+                if reason2 and ip2==ip:
+                    log(f'Confirmed bad exit ({reason2}); starting search')
+                    search(region,wait,delay,gemini,mb,strict)
+                else:log('Second check recovered/inconclusive: preserving connection')
+                failures=0
+            elif not state or (not config.get('TargetServerEntry') and not state.get('adopted_unpinned')):
+                # Existing working tunnel is useful even without TargetServerEntry.
+                adopt_current(region,gemini,mb,strict,observed=(ip,geo,verdict,speed,reason))
+                failures=0
+            elif changed or state.get('region')!=region:
+                log('Exit/region changed; evaluating current healthy exit')
+                if not config.get('TargetServerEntry'):
+                    adopt_current(region,gemini,mb,strict,observed=(ip,geo,verdict,speed,reason))
+                else:
+                    search(region,wait,delay,gemini,mb,strict)
+                failures=0
+            else:
+                failures=0
+                # Persist each completed health check, without changing the pin identity.
+                if state:
+                    state.update(google_region=geo, gemini=verdict, speed_kib_s=speed,
+                                 verified_at=dt.datetime.now(dt.timezone.utc).isoformat())
+                    atomic_json(STATE,state)
+                log(f'Healthy exit unchanged: {ip} Google={geo} Gemini={verdict}; '
+                    + ('adopted (not pinned)' if state.get('adopted_unpinned') else 'pinned'))
+        except Exception as exc:
+            failures+=1
+            log(f'UNKNOWN/OUTAGE {failures}/{threshold}: {exc}; no RU inference')
+            if failures>=threshold:
+                log('Consecutive failures reached threshold; recovering connection')
+                try:
+                    docker_restart(wait)
+                    # Only run rotation if the restarted tunnel is still unusable.
+                    ip,geo,verdict,_,reason=evaluate_exit(region,gemini,0,strict)
+                    if reason:
+                        search(region,wait,delay,gemini,mb,strict)
+                    else:
+                        log(f'Recovered without full search: {ip} Google={geo} Gemini={verdict}')
+                except Exception as e:
+                    log(f'Recovery incomplete: {e}; defer next attempt')
+                failures=0
+        time.sleep(interval)
 
 def main():
-    p=argparse.ArgumentParser(description='Auto-rotate and pin Psiphon based on Google geo signal')
-    p.add_argument('action',choices=['check','search','monitor'])
-    p.add_argument('--proxy',default='127.0.0.1:40000')
-    p.add_argument('--container',default='vps-psiphon')
-    p.add_argument('--config',default='/opt/vps-psiphon/config/psiphon.config')
-    p.add_argument('--db',default='/opt/vps-psiphon/config/ca.psiphon.PsiphonTunnel.tunnel-core/datastore/psiphon.boltdb')
-    p.add_argument('--region',default=None,help='Psiphon region code, or AUTO; otherwise ask interactively')
-    p.add_argument('--settings',default='/var/lib/psiphon-autopin/settings.json')
-    p.add_argument('--attempts',type=int,default=12)
-    p.add_argument('--wait',type=int,default=35)
-    p.add_argument('--interval',type=int,default=900)
-    p.add_argument('--state',default='/var/lib/psiphon-autopin/state.json')
-    a=p.parse_args(); path=Path(a.config); db=Path(a.db)
-    a.region=choose_region(a.region, Path(a.settings), a.action)
-    if a.attempts<1 or a.wait<5 or a.interval<30: p.error('invalid timing/attempts')
-    def probe():
-        try:
-            ip,region=check(a.proxy); log(f'IP={ip} Google={region}')
-            return ip,region
-        except Exception as e:
-            log(f'CHECK UNKNOWN: {e}'); return None,None
-    def search():
-        if not path.is_file() or not db.is_file(): raise RuntimeError('Config or datastore not found')
-        cfg=json.loads(path.read_text())
-        # Unpin before search. Retain region preference, avoid disabling tactics while searching.
-        backup=save_config(path,{'TargetServerEntry':'','EgressRegion':a.region,'DisableTactics':False})
-        log(f'Search started; original config backed up: {backup}')
-        seen=set()
-        for n in range(1,a.attempts+1):
-            log(f'Attempt {n}/{a.attempts}: restarting Psiphon')
-            restart(a.container,a.wait)
-            ip,geo=probe()
-            if not ip or not geo: continue
-            if ip in seen: log('Repeated exit IP (no guarantee of new address)')
-            seen.add(ip)
-            if geo=='RU': log('Google=RU, rotating'); continue
-            diagnostic=latest_diagnostic(a.container)
-            entry=get_entry(db,diagnostic,a.region)
-            target=('0 0 0 0 '+json.dumps(entry,separators=(',',':'))).encode().hex()
-            pinned_backup=save_config(path,{'TargetServerEntry':target,'TunnelPoolSize':1,'EgressRegion':a.region,'DisableTactics':True,'InitialLimitTunnelProtocols':[],'InitialLimitTunnelProtocolsCandidateCount':0,'EmitDiagnosticNotices':True,'EmitDiagnosticNetworkParameters':False})
-            log(f'Candidate Google={geo} exit={ip}; pinning entry={entry["ipAddress"]}; backup={pinned_backup}')
-            restart(a.container,a.wait)
-            new_ip,new_geo=probe()
-            if new_ip==ip and new_geo==geo:
-                state=Path(a.state); state.parent.mkdir(parents=True,exist_ok=True)
-                state.write_text(json.dumps({'ip':ip,'google_region':geo,'updated':datetime.datetime.now().isoformat()}))
-                log(f'PIN VERIFIED: {ip} Google={geo}'); return True
-            log('Post-pin verification failed; continuing search')
-            # A failed candidate will be unpinned at the next search iteration.
-            save_config(path,{'TargetServerEntry':'','DisableTactics':False})
-        log('NO VERIFIED CANDIDATE: restored initial config; not forcing a bad pin')
-        shutil.copy2(backup,path)
-        restart(a.container,a.wait)
-        return False
-    if a.action=='check':
-        ip,geo=probe(); return 0 if ip and geo and geo!='RU' else 1
-    if a.action=='search': return 0 if search() else 2
-    bad=0
-    while True:
-        ip,geo=probe()
-        try: expected=json.loads(Path(a.state).read_text()).get('ip')
-        except (OSError,ValueError): expected=None
-        if geo=='RU' or (ip and expected and ip!=expected): bad+=1
-        elif geo: bad=0
-        else: log('Unknown result; not counting as failure')
-        if bad>=2:
-            log('Google=RU or exit IP changed twice; searching replacement')
-            try: search()
-            except Exception as e: log(f'Search error: {e}')
-            bad=0
-        time.sleep(a.interval)
-
-if __name__=='__main__':
-    try: raise SystemExit(main())
-    except KeyboardInterrupt: raise SystemExit(130)
-    except Exception as e:
-        log(f'ERROR: {e}'); raise SystemExit(1)
+    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.4')
+    ap.add_argument('command',choices=['check','search','monitor','status'])
+    ap.add_argument('--region',default=None)
+    ap.add_argument('--port',type=int,default=None)
+    ap.add_argument('--interval',type=int,default=3600)
+    ap.add_argument('--wait',type=int,default=75)
+    ap.add_argument('--delay',type=int,default=12)
+    ap.add_argument('--gemini-check',action='store_true',default=None)
+    ap.add_argument('--no-gemini-check',dest='gemini_check',action='store_false')
+    ap.add_argument('--probe-mb',type=int,default=None)
+    ap.add_argument('--strict-region',action='store_true',default=None)
+    ap.add_argument('--no-strict-region',dest='strict_region',action='store_false')
+    ap.add_argument('--fail-threshold',type=int,default=None)
+    args=ap.parse_args()
+    settings=read_json(DATA/'settings.json',{}) or {}
+    # settings.json stores the effective service configuration for status and CLI.
+    # Explicit CLI arguments still win over persisted settings.
+    if args.gemini_check is None:args.gemini_check=bool(settings.get('gemini_check',False))
+    if args.probe_mb is None:args.probe_mb=int(settings.get('probe_mb',0))
+    if args.strict_region is None:args.strict_region=bool(settings.get('strict_region',False))
+    if args.fail_threshold is None:args.fail_threshold=int(settings.get('fail_threshold',3))
+    region=(args.region if args.region is not None else settings.get('region','')).upper()
+    global PROXY
+    port=args.port if args.port is not None else int(settings.get('port',40000))
+    if not 1024 <= port <= 65534:ap.error('port must be 1024..65534')
+    PROXY=f'127.0.0.1:{port}'
+    if region=='AUTO':region=''
+    if region and not re.fullmatch('[A-Z]{2}',region):ap.error('invalid country')
+    if args.interval<60 or args.wait<20 or args.delay<2:ap.error('interval>=60 wait>=20 delay>=2')
+    if not 0<=args.probe_mb<=10 or not 2<=args.fail_threshold<=20:ap.error('probe-mb 0..10, fail-threshold 2..20')
+    if args.command=='status':
+        print(json.dumps({'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
+    if args.command=='check':
+        _,geo=probe()
+        verdict=gemini_verdict(args.gemini_check)
+        return 2 if geo=='RU' or verdict=='REFUSED' else 0
