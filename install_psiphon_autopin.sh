@@ -94,3 +94,67 @@ systemctl enable --now docker
 if ! docker info >/dev/null 2>&1; then
     echo '[ERROR] Docker daemon not responding' >&2; exit 1
 fi
+
+# Check both listeners when creating a container or changing its ports.
+port_occupied() {
+    ss -ltnH | awk '{print $4}' | grep -Eq "(^|:)$1$"
+}
+
+if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+    [[ -f $CONF/psiphon.config ]] || { echo "Missing $CONF/psiphon.config" >&2; exit 1; }
+    # Never adopt a foreign container with the same name: legacy installations
+    # commonly publish 40000:1080 and ignore the new port in the JSON.
+    IMAGE=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER")
+    NETMODE=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CONTAINER")
+    MOUNT_OK=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Source}}{{end}}{{end}}' "$CONTAINER")
+    if [[ "$IMAGE" != 'local-psiphon-console:latest' || "$NETMODE" != 'host' || "$MOUNT_OK" != "$CONF" ]]; then
+        echo "[ERROR] Existing $CONTAINER is not ours (image=$IMAGE network=$NETMODE mount=$MOUNT_OK)." >&2
+        echo '[ERROR] Stop legacy psiphon services and migrate explicitly; no container was replaced.' >&2
+        exit 1
+    fi
+    echo '[INFO] Existing compatible Psiphon container preserved.'
+    CURRENT_SOCKS_PORT=$(python3 - "$CONF/psiphon.config" <<'PYOLDPORT'
+import json,sys
+print(json.load(open(sys.argv[1])).get('LocalSocksProxyPort',40000))
+PYOLDPORT
+)
+    if [[ "$CURRENT_SOCKS_PORT" != "$SOCKS_PORT" ]]; then
+        if port_occupied "$SOCKS_PORT" || port_occupied "$HTTP_PORT"; then
+            echo "[ERROR] New SOCKS/HTTP port $SOCKS_PORT/$HTTP_PORT occupied" >&2; exit 1
+        fi
+    fi
+    docker start "$CONTAINER" >/dev/null || true
+else
+    [[ ! -e $CONF/psiphon.config ]] || { echo 'Config exists but container missing; refusing overwrite.' >&2; exit 1; }
+    if port_occupied "$SOCKS_PORT" || port_occupied "$HTTP_PORT"; then
+        echo "SOCKS/HTTP port $SOCKS_PORT/$HTTP_PORT already occupied" >&2; exit 1
+    fi
+    echo '[INFO] Bootstrapping Psiphon...'
+    docker pull swarupsengupta2007/psiphon:latest
+    docker run --rm --entrypoint cat swarupsengupta2007/psiphon:latest /etc/psiphon/psiphon.config > "$CONF/psiphon.config"
+    chmod 600 "$CONF/psiphon.config"
+    python3 - "$CONF/psiphon.config" "$REGION" "$SOCKS_PORT" "$HTTP_PORT" <<'CONFIG_INIT'
+import json,sys
+p,r,socks,http=sys.argv[1:]
+c=json.load(open(p))
+c.update(EgressRegion=r,ListenInterface='lo',LocalSocksProxyPort=int(socks),LocalHttpProxyPort=int(http),TunnelPoolSize=1,EmitDiagnosticNotices=True,DisableReplay=True)
+c.pop('LocalSocksProxyListenAddress',None)
+c.pop('LocalHttpProxyListenAddress',None)
+with open(p,'w') as f: json.dump(c,f,indent=2); f.write('\n')
+CONFIG_INIT
+    tree=$(mktemp)
+    curl --fail --location --silent --show-error --retry 3 'https://api.github.com/repos/Psiphon-Labs/psiphon-tunnel-core-binaries/git/trees/master?recursive=1' -o "$tree"
+    path=$(python3 - "$tree" <<'PICK_BINARY'
+import json,sys
+rows=json.load(open(sys.argv[1]))['tree']
+m=[v['path'] for v in rows if v['type']=='blob' and v['path'].startswith('linux/') and any(x in v['path'].lower() for x in ('amd64','x86_64')) and any(x in v['path'].lower() for x in ('consoleclient','psiphon-tunnel-core'))]
+if len(m)!=1: raise SystemExit('Expected one official executable: '+str(m))
+print(m[0])
+PICK_BINARY
+)
+    rm -f "$tree"
+    curl --fail --location --silent --show-error --retry 3 "https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/$path" -o "$ROOT/ConsoleClient"
+    chmod 755 "$ROOT/ConsoleClient"
+    cat > "$ROOT/Dockerfile" <<'DOCKERFILE'
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
