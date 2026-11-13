@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Forcus Psiphon Auto-Pin Manager v3.4.2
+# Forcus Psiphon Auto-Pin Manager v3.5.0
 # Author: https://github.com/Forcus356
 # Ubuntu/Debian x86_64
 set -Eeuo pipefail
@@ -13,10 +13,11 @@ ROOT=/opt/vps-psiphon; CONF="$ROOT/config"; APP=/opt/psiphon-autopin
 DATA=/var/lib/psiphon-autopin; CONTAINER=vps-psiphon
 REGION=''; INTERVAL=3600; WAIT=75; DELAY=12; SOCKS_PORT=''
 GEMINI_CHECK=0; PROBE_MB=0; FAIL_THRESHOLD=3; STRICT_REGION=0
-PORT_EXPLICIT=0
+PORT_EXPLICIT=0; BACKEND=auto; REGION_EXPLICIT=0
 while (($#)); do
     case "$1" in
-        --region) REGION=${2:?Missing region}; shift 2 ;;
+        --region) REGION=${2:?Missing region}; REGION_EXPLICIT=1; shift 2 ;;
+        --backend) BACKEND=${2:?Missing backend}; shift 2 ;;
         --port) SOCKS_PORT=${2:?Missing port}; PORT_EXPLICIT=1; shift 2 ;;
         --interval) INTERVAL=${2:?Missing interval}; shift 2 ;;
         --wait) WAIT=${2:?Missing wait}; shift 2 ;;
@@ -26,10 +27,55 @@ while (($#)); do
         --strict-region) STRICT_REGION=1; shift ;;
         --probe-mb) PROBE_MB=${2:?Missing MB}; shift 2 ;;
         --fail-threshold) FAIL_THRESHOLD=${2:?Missing threshold}; shift 2 ;;
-        --help) echo 'Usage: install_psiphon_autopin.sh [--region DE|AUTO] [--port 40000] [--interval 3600] [--wait 75] [--delay 12] [--gemini-check] [--probe-mb 0..10] [--strict-region] [--fail-threshold 3]'; exit 0 ;;
+        --help) echo 'Usage: install_psiphon_autopin.sh [--backend auto|console|vps-psiphon] [--region DE|AUTO] [--port 40000] [--interval 3600] [--wait 75] [--delay 12] [--gemini-check] [--probe-mb 0..10] [--strict-region] [--fail-threshold 3]'; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+# Reinstalls retain the installed region and host port unless explicitly changed.
+[[ $BACKEND == auto || $BACKEND == console || $BACKEND == vps-psiphon ]] || { echo 'Invalid backend' >&2; exit 2; }
+if [[ $BACKEND == auto ]]; then
+    if [[ -f /etc/default/vps-psiphon && -x /usr/local/sbin/vps-psiphon-run ]]; then
+        BACKEND=vps-psiphon
+    elif [[ -f $DATA/settings.json ]]; then
+        BACKEND=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("backend","console"))' "$DATA/settings.json")
+    elif docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null | grep -qx 'local-psiphon-console:latest'; then
+        BACKEND=console
+    else
+        BACKEND=vps-psiphon
+    fi
+fi
+[[ $BACKEND == console || $BACKEND == vps-psiphon ]] || { echo 'Invalid saved backend' >&2; exit 2; }
+if [[ -f $DATA/settings.json ]]; then
+    if (( ! REGION_EXPLICIT )); then
+        REGION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("region","") or "AUTO")' "$DATA/settings.json")
+    fi
+    if (( ! PORT_EXPLICIT )); then
+        SOCKS_PORT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("port",40000))' "$DATA/settings.json")
+    fi
+elif [[ $BACKEND == vps-psiphon && -f /etc/default/vps-psiphon ]]; then
+    # Parse values, never execute the foreign env file during discovery.
+    if (( ! REGION_EXPLICIT )); then
+        REGION=$(sed -n 's/^EGRESS_REGION=//p' /etc/default/vps-psiphon | head -1 | tr -d "\"'")
+        REGION=${REGION:-AUTO}
+    fi
+    if (( ! PORT_EXPLICIT )); then
+        SOCKS_PORT=$(sed -n 's/^SOCKS_PORT=//p' /etc/default/vps-psiphon | head -1 | tr -d "\"'")
+        # The instruction's patched launcher can publish 40000:1080 while the
+        # env file still says 1080. The actual published host port wins.
+        published=$(docker inspect -f '{{json .HostConfig.PortBindings}}' "$CONTAINER" 2>/dev/null || true)
+        if [[ -n $published ]]; then
+            actual_port=$(python3 - "$published" "$SOCKS_PORT" <<'HOST_PORT'
+import json,sys
+bindings=json.loads(sys.argv[1]) or {}
+rows=bindings.get(f'{sys.argv[2]}/tcp') or bindings.get('1080/tcp') or []
+ports={row.get('HostPort','') for row in rows}
+print(ports.pop() if len(ports)==1 else '')
+HOST_PORT
+)
+            [[ -z $actual_port ]] || SOCKS_PORT=$actual_port
+        fi
+    fi
+fi
 if [[ -z $REGION ]]; then
     if [[ -r /dev/tty ]]; then
         read -r -p 'Psiphon country [DE] (or AUTO): ' REGION </dev/tty
@@ -63,10 +109,9 @@ REGION=${REGION^^}
 [[ $REGION == AUTO ]] && REGION=''
 mkdir -p "$ROOT" "$CONF" "$APP" "$DATA"
 chmod 700 "$DATA"
-echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v3.4.2"
+echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v3.5.0; backend=$BACKEND"
 
-# Stop old writer before updating executable/config. This does not stop the VPN container.
-systemctl stop psiphon-autopin.service 2>/dev/null || true
+# Monitor is stopped after installation ownership checks below.
 
 # Install only missing packages. Never replace Docker CE with Ubuntu docker.io.
 PACKAGES=()
@@ -100,6 +145,127 @@ port_occupied() {
     ss -ltnH | awk '{print $4}' | grep -Eq "(^|:)$1$"
 }
 
+# vps-psiphon is systemd-owned and uses --rm: its container can be absent
+# between starts. Recognize the installation by BOTH launcher and env file.
+if [[ $BACKEND == vps-psiphon ]]; then
+    LEGACY=0
+    if [[ -f /etc/default/vps-psiphon && -x /usr/local/sbin/vps-psiphon-run ]] && systemctl cat vps-psiphon.service >/dev/null 2>&1; then
+        LEGACY=1
+    elif [[ -e $CONF/psiphon.config ]] || docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+        echo '[ERROR] Existing Psiphon is not a recognized vps-psiphon installation; use --backend console for an existing Auto-Pin console container.' >&2
+        exit 1
+    fi
+    # Reject name/mount/image overrides before changing any running services.
+    if (( LEGACY )); then
+        python3 - /etc/default/vps-psiphon <<'VALIDATE_VPS'
+import shlex,sys
+values={}
+for line in open(sys.argv[1]):
+    if '=' in line and not line.lstrip().startswith('#'):
+        key,value=line.rstrip().split('=',1)
+        parts=shlex.split(value,comments=True)
+        values[key]=' '.join(parts)
+for key,want in {'NAME':'vps-psiphon','CONF_DIR':'/opt/vps-psiphon/config',
+                 'IMAGE':'swarupsengupta2007/psiphon:latest'}.items():
+    if values.get(key,want)!=want:raise SystemExit(f'Unsupported vps-psiphon {key}; no services changed')
+VALIDATE_VPS
+        if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+            [[ $(docker inspect -f '{{.Config.Image}}' "$CONTAINER") == swarupsengupta2007/psiphon:latest &&
+               $(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Source}}{{end}}{{end}}' "$CONTAINER") == "$CONF" ]] || {
+                echo '[ERROR] Foreign vps-psiphon container; no services changed.' >&2; exit 1;
+            }
+        fi
+    fi
+    systemctl stop psiphon-autopin.service 2>/dev/null || true
+    # Only Auto-Pin may rotate this tunnel: disable the independent watchdog.
+    systemctl disable --now vps-psiphon-watchdog.timer vps-psiphon-watchdog.service 2>/dev/null || true
+    if (( LEGACY )); then systemctl stop vps-psiphon.service; fi
+    # Back up the stopped datastore and all files changed by the migration.
+    BACKUP="$DATA/backup-$(date +%Y%m%d-%H%M%S)-$$"
+    mkdir -m 700 "$BACKUP"
+    cp -a "$CONF" "$BACKUP/config"
+    for f in /etc/default/vps-psiphon /usr/local/sbin/vps-psiphon-run "$DATA/settings.json" "$DATA/state.json" "$DATA/server-entry-cache.json"; do
+        [[ ! -f $f ]] || cp -a "$f" "$BACKUP/"
+    done
+    systemctl cat vps-psiphon.service > "$BACKUP/vps-psiphon.service" 2>/dev/null || true
+    echo "[INFO] Migration backup: $BACKUP"
+    if (( ! LEGACY )); then
+        for port in "$SOCKS_PORT" "$HTTP_PORT"; do
+            if port_occupied "$port"; then echo "[ERROR] Proxy port $port occupied" >&2; exit 1; fi
+        done
+        # Pin the reviewed upstream installer rather than execute a moving main branch.
+        upstream=$(mktemp)
+        curl -fLsS --retry 3 https://raw.githubusercontent.com/Chara-Freedom/vps-psiphon/a42966845ecc5b477d14962b9ddf5c284dbc1bcd/psiphon_install.sh -o "$upstream"
+        echo "1428beeaab91de159e5354308a8b30948ca6c406bfa37a5d5298071e0f6319d2  $upstream" | sha256sum -c -
+        bash "$upstream" --bind-loopback --region "$REGION" --socks-port "$SOCKS_PORT" --http-port "$HTTP_PORT" --http --no-watchdog --tunnel-pool 1 --bulk-test-mb 0
+        rm -f "$upstream"
+    fi
+    systemctl stop vps-psiphon.service
+    if port_occupied "$SOCKS_PORT" || port_occupied "$HTTP_PORT"; then
+        echo "[ERROR] SOCKS/HTTP port $SOCKS_PORT/$HTTP_PORT occupied; original files are in $BACKUP" >&2
+        systemctl start vps-psiphon.service
+        exit 1
+    fi
+    # Keep host ports separate from container ports; do not patch upstream with sed.
+    python3 - /etc/default/vps-psiphon "$REGION" "$SOCKS_PORT" "$HTTP_PORT" <<'VPS_ENV'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);region,socks,http=sys.argv[2:]
+updates={'NAME':'vps-psiphon','CONF_DIR':'/opt/vps-psiphon/config',
+         'IMAGE':'swarupsengupta2007/psiphon:latest',
+         'BIND':'127.0.0.1','SOCKS_PORT':socks,'HTTP_PORT':http,
+         'PUBLISH_HTTP':'1','EGRESS_REGION':region,'TUNNEL_POOL_SIZE':'1',
+         'REGION_POOL':"''"}
+lines=p.read_text().splitlines()
+lines=[line for line in lines if line.split('=',1)[0] not in updates]
+p.write_text('\n'.join(lines+[f'{k}={v}' for k,v in updates.items()])+'\n')
+VPS_ENV
+    cat > /usr/local/sbin/vps-psiphon-run <<'VPS_RUN'
+#!/usr/bin/env bash
+# Managed by Forcus Auto-Pin. Host ports in env; fixed ports inside Docker.
+set -euo pipefail
+. /etc/default/vps-psiphon
+[[ $BIND == 127.0.0.1 ]] || { echo 'Auto-Pin requires loopback BIND' >&2; exit 1; }
+python3 - "$CONF_DIR/psiphon.config" "${EGRESS_REGION:-}" <<'VPS_CONFIG'
+import json,os,sys,tempfile
+p,region=sys.argv[1:];st=os.stat(p)
+with open(p) as f:c=json.load(f)
+c.update(EgressRegion=region,ListenInterface='any',LocalSocksProxyPort=1080,
+         LocalHttpProxyPort=8080,TunnelPoolSize=1,EmitDiagnosticNotices=True,DisableReplay=True)
+c.pop('LocalSocksProxyListenAddress',None);c.pop('LocalHttpProxyListenAddress',None)
+with tempfile.NamedTemporaryFile('w',dir=os.path.dirname(p),delete=False) as f:
+    json.dump(c,f,indent=2);f.write('\n');name=f.name
+os.chown(name,st.st_uid,st.st_gid);os.chmod(name,st.st_mode & 0o777)
+os.replace(name,p)
+VPS_CONFIG
+docker rm -f "$NAME" >/dev/null 2>&1 || true
+exec docker run --rm --name "$NAME" \
+    -p "127.0.0.1:${SOCKS_PORT}:1080" -p "127.0.0.1:${HTTP_PORT}:8080" \
+    -e PUID=1000 -e PGID=1000 -e SOCKS_PORT=1080 -e HTTP_PORT=8080 \
+    -e DEVICE_REGION="${DEVICE_REGION:-}" -e EGRESS_REGION="${EGRESS_REGION:-}" \
+    -v "${CONF_DIR}:/config" "$IMAGE"
+VPS_RUN
+    chmod 755 /usr/local/sbin/vps-psiphon-run
+    if [[ ! -s $CONF/psiphon.config ]]; then
+        docker run --rm --entrypoint cat swarupsengupta2007/psiphon:latest /etc/psiphon/psiphon.config > "$CONF/psiphon.config"
+        chown 1000:1000 "$CONF/psiphon.config"
+        chmod 600 "$CONF/psiphon.config"
+    fi
+    # Clear previous target only when the requested region actually changes.
+    python3 - "$CONF/psiphon.config" "$DATA/state.json" "$REGION" <<'VPS_REGION'
+import json,sys
+from pathlib import Path
+p,s,r=sys.argv[1:]
+c=json.loads(Path(p).read_text())
+if c.get('EgressRegion','')!=r:
+    c.pop('TargetServerEntry',None)
+    Path(s).unlink(missing_ok=True)
+    (Path(s).parent/'server-entry-cache.json').unlink(missing_ok=True)
+c.update(EgressRegion=r,EmitDiagnosticNotices=True,TunnelPoolSize=1)
+Path(p).write_text(json.dumps(c,indent=2)+'\n')
+VPS_REGION
+    systemctl start vps-psiphon.service
+else
 if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
     [[ -f $CONF/psiphon.config ]] || { echo "Missing $CONF/psiphon.config" >&2; exit 1; }
     # Never adopt a foreign container with the same name: legacy installations
@@ -112,6 +278,7 @@ if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
         echo '[ERROR] Stop legacy psiphon services and migrate explicitly; no container was replaced.' >&2
         exit 1
     fi
+    systemctl stop psiphon-autopin.service 2>/dev/null || true
     echo '[INFO] Existing compatible Psiphon container preserved.'
     CURRENT_SOCKS_PORT=$(python3 - "$CONF/psiphon.config" <<'PYOLDPORT'
 import json,sys
@@ -129,6 +296,7 @@ else
     if port_occupied "$SOCKS_PORT" || port_occupied "$HTTP_PORT"; then
         echo "SOCKS/HTTP port $SOCKS_PORT/$HTTP_PORT already occupied" >&2; exit 1
     fi
+    systemctl stop psiphon-autopin.service 2>/dev/null || true
     echo '[INFO] Bootstrapping Psiphon...'
     docker pull swarupsengupta2007/psiphon:latest
     docker run --rm --entrypoint cat swarupsengupta2007/psiphon:latest /etc/psiphon/psiphon.config > "$CONF/psiphon.config"
@@ -193,11 +361,38 @@ if [[ -n "$SYNC_CHANGED" ]]; then
     docker restart "$CONTAINER" >/dev/null
 fi
 
+fi # console backend
+
 # Fail closed: ConsoleClient must not expose either unauthenticated proxy on a public interface.
 # This includes configurations inherited from a previously installed Psiphon container.
 # Inspect actual listening sockets, not just the JSON file.
+vps_mapping_ok() {
+    docker inspect -f '{{json .HostConfig.PortBindings}}' "$CONTAINER" 2>/dev/null | python3 -c '
+import json,sys
+try:
+    ports=json.load(sys.stdin)
+    expected={"1080/tcp":[{"HostIp":"127.0.0.1","HostPort":sys.argv[1]}],
+              "8080/tcp":[{"HostIp":"127.0.0.1","HostPort":sys.argv[2]}]}
+    sys.exit(0 if ports==expected else 1)
+except (ValueError,TypeError):sys.exit(1)
+' "$SOCKS_PORT" "$HTTP_PORT"
+}
+proxy_listeners_ready() {
+    if [[ $BACKEND == vps-psiphon ]]; then
+        vps_mapping_ok
+    else
+        ss -H -ltn | awk -v socks=":$SOCKS_PORT" -v http=":$HTTP_PORT" '
+            $4 ~ socks "$" { a=1 } $4 ~ http "$" { b=1 } END { exit !(a && b) }
+        '
+    fi
+}
 verify_proxy_binding() {
     local bad
+    if [[ $BACKEND == vps-psiphon ]] && docker container inspect "$CONTAINER" >/dev/null 2>&1 && ! vps_mapping_ok; then
+        echo '[SECURITY ERROR] Unexpected Docker port mappings; stopping vps-psiphon.' >&2
+        systemctl stop vps-psiphon.service
+        exit 1
+    fi
     bad=$(ss -H -ltnp | awk -v socks=":$SOCKS_PORT" -v http=":$HTTP_PORT" '
         {
           addr=$4
@@ -210,7 +405,7 @@ verify_proxy_binding() {
         echo "[SECURITY ERROR] Psiphon proxy is listening outside localhost:" >&2
         echo "$bad" >&2
         echo '[SECURITY ERROR] Stopping Psiphon to prevent exposure.' >&2
-        docker stop "$CONTAINER" >/dev/null || true
+        if [[ $BACKEND == vps-psiphon ]]; then systemctl stop vps-psiphon.service; else docker stop "$CONTAINER" >/dev/null || true; fi
         exit 1
     fi
 }
@@ -236,7 +431,7 @@ if missing:
 print('Bootstrap fields added:',missing)
 BOOTSTRAP
     rm -f "$template"
-    docker restart "$CONTAINER" >/dev/null
+    if [[ $BACKEND == vps-psiphon ]]; then systemctl restart vps-psiphon.service; else docker restart "$CONTAINER" >/dev/null; fi
 fi
 
 # Google region classifier from Davoyan. Force its proxy requests to use remote SOCKS DNS.
@@ -390,7 +585,7 @@ python3 -m py_compile "$APP/gemini_probe.py"
 
 cat > "$APP/psiphon_autopin.py" <<'PY_MANAGER'
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v3.4.2: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v3.5.0: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import datetime as dt
 import fcntl
@@ -401,6 +596,7 @@ from pathlib import Path
 import random
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -412,6 +608,7 @@ CONFIG=Path('/opt/vps-psiphon/config/psiphon.config')
 CONTAINER='vps-psiphon'
 PROXY='127.0.0.1:40000'  # Updated from settings / --port in main()
 STATE=DATA/'state.json'
+ENV_FILE=Path('/etc/default/vps-psiphon')
 
 def log(message):
     print(dt.datetime.now().astimezone().isoformat(timespec='seconds'),message,flush=True)
@@ -445,6 +642,64 @@ def change_config(updates):
     if not isinstance(obj,dict):raise RuntimeError('Invalid Psiphon configuration')
     obj.update(updates)
     atomic_json(CONFIG,obj)
+
+def backend():
+    value=(read_json(DATA/'settings.json',{}) or {}).get('backend','console')
+    if value not in ('console','vps-psiphon'):raise RuntimeError('Invalid saved backend')
+    return value
+
+def tunnel_action(action):
+    # A --rm container owned by systemd cannot be stopped/restarted via Docker:
+    # systemd would race discovery and reopen BoltDB while the exporter reads it.
+    if backend()=='vps-psiphon':
+        return run(['systemctl',action,'vps-psiphon.service'],timeout=120)
+    return run(['docker',action,CONTAINER],timeout=90)
+
+def update_region_env(region):
+    if backend()!='vps-psiphon':return
+    path=ENV_FILE
+    lines=path.read_text().splitlines()
+    lines=[line for line in lines if line.split('=',1)[0] not in ('EGRESS_REGION','REGION_POOL')]
+    # Same-directory atomic replacement, retaining owner/mode of the env file.
+    st=path.stat();name=None
+    try:
+        with tempfile.NamedTemporaryFile('w',dir=path.parent,delete=False) as f:
+            name=f.name
+            f.write('\n'.join(lines+[f'EGRESS_REGION={region}',"REGION_POOL=''"])+ '\n')
+            f.flush();os.fsync(f.fileno())
+        os.chown(name,st.st_uid,st.st_gid);os.chmod(name,st.st_mode & 0o777)
+        os.replace(name,path)
+    finally:
+        if name and os.path.exists(name):os.unlink(name)
+
+def set_region(region,wait):
+    """Persist region, discard the old target and reconnect under the writer lock."""
+    settings=read_json(DATA/'settings.json',{}) or {}
+    config=read_json(CONFIG)
+    if not isinstance(config,dict):raise RuntimeError('Invalid Psiphon configuration')
+    env_matches=True
+    if backend()=='vps-psiphon':
+        values=[shlex.split(line.split('=',1)[1],comments=True)
+                for line in ENV_FILE.read_text().splitlines() if line.startswith('EGRESS_REGION=')]
+        env_matches=(values==[[region]] if region else values==[[]] or values==[['']])
+    if env_matches and settings.get('region','')==region and config.get('EgressRegion','')==region:
+        log(f'Region already {region or "AUTO"}; tunnel unchanged')
+        return
+    stamp=dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S-%f')
+    backup=DATA/f'region-backup-{stamp}'
+    backup.mkdir(mode=0o700)
+    for path in (CONFIG,DATA/'settings.json',STATE,CACHE):
+        if path.is_file():shutil.copy2(path,backup/path.name)
+    if backend()=='vps-psiphon':
+        shutil.copy2(ENV_FILE,backup/'vps-psiphon')
+    update_region_env(region)
+    change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':1})
+    settings['region']=region
+    atomic_json(DATA/'settings.json',settings)
+    STATE.unlink(missing_ok=True);CACHE.unlink(missing_ok=True)
+    log(f'Region saved: {region or "AUTO"}; backup={backup}; reconnecting')
+    docker_restart(wait)
+    log('SOCKS5 tunnel ready; the monitor will check Google/Gemini separately')
 
 def socks_ip():
     # Explicit SOCKS5h proxy, remote DNS, no direct fallback or proxy bypass.
@@ -602,7 +857,7 @@ def pin_prepared_verification(region,ip,geo,diag,reason,state):
     return False
 
 def docker_restart(wait):
-    run(['docker','restart',CONTAINER],timeout=90)
+    tunnel_action('restart')
     deadline=time.monotonic()+wait;error='unknown'
     while time.monotonic()<deadline:
         try:return socks_ip()
@@ -612,7 +867,7 @@ def docker_restart(wait):
 def collect_candidates(region):
     # BoltDB is read only with the container stopped; always start it again.
     log('Exporting distinct server entries from read-only BoltDB...')
-    run(['docker','stop',CONTAINER],timeout=90)
+    tunnel_action('stop')
     try:
         raw=run([str(BASE/'psiphon-server-export'),str(db_path()),region],timeout=120)
         rows=[json.loads(line) for line in raw.splitlines() if line.strip()]
@@ -622,12 +877,13 @@ def collect_candidates(region):
         log(f'Loaded {len(rows)} distinct servers')
         return rows
     finally:
-        run(['docker','start',CONTAINER],timeout=90)
+        tunnel_action('start')
 
 def apply_candidate(candidate,region):
     change_config({'EgressRegion':region,'TargetServerEntry':candidate['encoded'],'TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True,'DisableTactics':False})
 
 def clear_target(region):
+    update_region_env(region)
     change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True,'DisableTactics':False})
 
 def verify_pin_current(region,gemini=False,mb=0,strict=False):
@@ -645,6 +901,11 @@ def verify_pin_current(region,gemini=False,mb=0,strict=False):
 
 def search(region,wait,delay,gemini=False,mb=0,strict=False):
     log(f'Server rotation started: {region or "AUTO"}; unlimited cycles')
+    # A CLI region override must take effect before accepting the current exit.
+    if (read_json(CONFIG,{}) or {}).get('EgressRegion','')!=region:
+        clear_target(region)
+        STATE.unlink(missing_ok=True)
+        docker_restart(wait)
     # Preserve a known good pin without needless restart.
     try:
         if verify_pin_current(region,gemini,mb,strict):return True
@@ -709,7 +970,7 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
         seen_exits.clear()
 
 def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
-    log(f'Monitor v3.4: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
+    log(f'Monitor v3.5: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
     failures=0
     while True:
         try:
@@ -774,8 +1035,8 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
         time.sleep(interval)
 
 def main():
-    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.4')
-    ap.add_argument('command',choices=['check','search','monitor','status','refresh-cache','prepare-pin'])
+    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.5')
+    ap.add_argument('command',choices=['check','search','monitor','status','refresh-cache','prepare-pin','set-region'])
     ap.add_argument('--region',default=None)
     ap.add_argument('--allow-interruption',action='store_true',help='Required for refresh-cache (briefly stops Psiphon)')
     ap.add_argument('--port',type=int,default=None)
@@ -789,6 +1050,7 @@ def main():
     ap.add_argument('--no-strict-region',dest='strict_region',action='store_false')
     ap.add_argument('--fail-threshold',type=int,default=None)
     args=ap.parse_args()
+    if args.command=='set-region' and args.region is None:ap.error('set-region requires --region CC|AUTO')
     settings=read_json(DATA/'settings.json',{}) or {}
     # settings.json stores the effective service configuration for status and CLI.
     # Explicit CLI arguments still win over persisted settings.
@@ -806,36 +1068,46 @@ def main():
     if args.interval<60 or args.wait<20 or args.delay<2:ap.error('interval>=60 wait>=20 delay>=2')
     if not 0<=args.probe_mb<=10 or not 2<=args.fail_threshold<=20:ap.error('probe-mb 0..10, fail-threshold 2..20')
     if args.command=='status':
-        print(json.dumps({'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
+        print(json.dumps({'backend':backend(),'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
     if args.command=='check':
-        _,geo=probe()
-        verdict=gemini_verdict(args.gemini_check)
-        return 2 if geo=='RU' or verdict=='REFUSED' else 0
+        *_,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
+        return 2 if reason else 0
     DATA.mkdir(parents=True,exist_ok=True)
-    with (DATA/'lock').open('w') as f:
-        try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError:raise RuntimeError('Another search/monitor is running')
-        if args.command=='refresh-cache':
-            # Explicit operator action with an interruption: stop, export, start.
-            # Never claim this happens without a connection interruption.
-            if not args.allow_interruption:
-                raise RuntimeError('refresh-cache interrupts Psiphon; repeat with --allow-interruption')
-            collect_candidates(region)
-            log('Candidate cache refreshed; Psiphon container restarted (tunnel may change)')
-        elif args.command=='prepare-pin':
-            ip,geo,verdict,speed,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
-            if reason:raise RuntimeError(f'Exit is not eligible for pin staging: {reason}')
-            state=read_json(STATE,{}) or {}
-            diag=connected_id()
-            if not state or state.get('ip')!=ip or state.get('diagnostic_id')!=diag:
-                adopt_current(region,args.gemini_check,args.probe_mb,args.strict_region,
-                              observed=(ip,geo,verdict,speed,reason))
-            if not prepare_current_pin(region,ip,geo,diag):
-                log('No unique cached matching server (or pin already prepared); tunnel untouched')
-        elif args.command=='search':
-            search(region,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region)
-        else:
-            monitor(region,args.interval,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region,args.fail_threshold)
+    resume_monitor=False
+    if args.command=='set-region':
+        active=subprocess.run(['systemctl','is-active','--quiet','psiphon-autopin.service']).returncode==0
+        if active:
+            run(['systemctl','stop','psiphon-autopin.service'],timeout=120)
+            resume_monitor=True
+    try:
+        with (DATA/'lock').open('w') as f:
+            try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise RuntimeError('Another search/monitor is running')
+            if args.command=='set-region':
+                set_region(region,args.wait)
+            elif args.command=='refresh-cache':
+                # Explicit operator action with an interruption: stop, export, start.
+                # Never claim this happens without a connection interruption.
+                if not args.allow_interruption:
+                    raise RuntimeError('refresh-cache interrupts Psiphon; repeat with --allow-interruption')
+                collect_candidates(region)
+                log('Candidate cache refreshed; Psiphon container restarted (tunnel may change)')
+            elif args.command=='prepare-pin':
+                ip,geo,verdict,speed,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
+                if reason:raise RuntimeError(f'Exit is not eligible for pin staging: {reason}')
+                state=read_json(STATE,{}) or {}
+                diag=connected_id()
+                if not state or state.get('ip')!=ip or state.get('diagnostic_id')!=diag:
+                    adopt_current(region,args.gemini_check,args.probe_mb,args.strict_region,
+                                  observed=(ip,geo,verdict,speed,reason))
+                if not prepare_current_pin(region,ip,geo,diag):
+                    log('No unique cached matching server (or pin already prepared); tunnel untouched')
+            elif args.command=='search':
+                search(region,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region)
+            else:
+                monitor(region,args.interval,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region,args.fail_threshold)
+    finally:
+        if resume_monitor:run(['systemctl','start','psiphon-autopin.service'],timeout=120)
     return 0
 
 if __name__=='__main__':
@@ -845,11 +1117,12 @@ if __name__=='__main__':
 PY_MANAGER
 chmod 700 "$APP/psiphon_autopin.py"
 python3 -m py_compile "$APP/psiphon_autopin.py"
-python3 - "$DATA/settings.json" "$REGION" "$SOCKS_PORT" "$GEMINI_CHECK" "$PROBE_MB" "$STRICT_REGION" "$FAIL_THRESHOLD" <<'SETTINGS'
+python3 - "$DATA/settings.json" "$REGION" "$SOCKS_PORT" "$GEMINI_CHECK" "$PROBE_MB" "$STRICT_REGION" "$FAIL_THRESHOLD" "$BACKEND" <<'SETTINGS'
 import json,sys
 obj={'region':sys.argv[2],'port':int(sys.argv[3]),
      'gemini_check':bool(int(sys.argv[4])),'probe_mb':int(sys.argv[5]),
-     'strict_region':bool(int(sys.argv[6])),'fail_threshold':int(sys.argv[7])}
+     'strict_region':bool(int(sys.argv[6])),'fail_threshold':int(sys.argv[7]),
+     'backend':sys.argv[8]}
 with open(sys.argv[1],'w') as f:json.dump(obj,f,indent=2);f.write('\n')
 SETTINGS
 chmod 600 "$DATA/settings.json"
@@ -857,16 +1130,18 @@ chmod 600 "$DATA/settings.json"
 EXTRA_FLAGS="--fail-threshold $FAIL_THRESHOLD --probe-mb $PROBE_MB"
 if (( GEMINI_CHECK )); then EXTRA_FLAGS="$EXTRA_FLAGS --gemini-check"; fi
 if (( STRICT_REGION )); then EXTRA_FLAGS="$EXTRA_FLAGS --strict-region"; fi
+TUNNEL_DEP=''
+if [[ $BACKEND == vps-psiphon ]]; then TUNNEL_DEP=vps-psiphon.service; fi
 cat > /etc/systemd/system/psiphon-autopin.service <<EOF
 [Unit]
-Description=Forcus Psiphon Auto-Pin v3.4.2 server rotation and Google geo monitor
-Wants=network-online.target
-After=network-online.target docker.service
+Description=Forcus Psiphon Auto-Pin v3.5.0 server rotation and Google geo monitor
+Wants=network-online.target $TUNNEL_DEP
+After=network-online.target docker.service $TUNNEL_DEP
 Requires=docker.service
 StartLimitIntervalSec=0
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 $APP/psiphon_autopin.py monitor --region ${REGION:-AUTO} --port $SOCKS_PORT --interval $INTERVAL --wait $WAIT --delay $DELAY $EXTRA_FLAGS
+ExecStart=/usr/bin/python3 $APP/psiphon_autopin.py monitor --interval $INTERVAL --wait $WAIT --delay $DELAY $EXTRA_FLAGS
 Restart=always
 RestartSec=30
 NoNewPrivileges=true
@@ -877,26 +1152,22 @@ EOF
 # A slow Psiphon tunnel need not be ready yet; listener visibility is checked for up to 20s.
 for _ in $(seq 1 20); do
     verify_proxy_binding
-    if ss -H -ltn | awk -v socks=":$SOCKS_PORT" -v http=":$HTTP_PORT" '
-        $4 ~ socks "$" { a=1 } $4 ~ http "$" { b=1 } END { exit !(a && b) }
-    '; then
-        echo '[OK] Both proxy sockets are bound to loopback.'
+    if proxy_listeners_ready; then
+        echo '[OK] Both proxies are published only on loopback.'
         break
     fi
     sleep 1
 done
 verify_proxy_binding
 # Do not start monitor when listeners have not appeared; fail closed and preserve config for diagnostics.
-if ! ss -H -ltn | awk -v socks=":$SOCKS_PORT" -v http=":$HTTP_PORT" '
-    $4 ~ socks "$" { a=1 } $4 ~ http "$" { b=1 } END { exit !(a && b) }
-'; then
+if ! proxy_listeners_ready; then
     echo '[ERROR] Proxy listeners were not created within 20 seconds; refusing to start monitor.' >&2
     exit 1
 fi
 systemctl daemon-reload
 systemctl enable psiphon-autopin.service
 systemctl restart psiphon-autopin.service
-printf '\n[OK] Forcus Psiphon Auto-Pin v3.4.2 installed\n'
+printf '\n[OK] Forcus Psiphon Auto-Pin v3.5.0 installed\n'
 echo '[OK] Existing healthy unpinned exits are retained; targeted pinning remains available.'
 echo "[OK] Gemini checks: $GEMINI_CHECK; optional throughput sample: ${PROBE_MB} MiB; strict region: $STRICT_REGION."
 echo "[OK] SOCKS5h: 127.0.0.1:$SOCKS_PORT (Google and IP checks through proxy)."

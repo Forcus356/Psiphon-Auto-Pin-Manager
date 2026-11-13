@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v3.4.2: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v3.5.0: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import datetime as dt
 import fcntl
@@ -10,6 +10,7 @@ from pathlib import Path
 import random
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,7 @@ CONFIG=Path('/opt/vps-psiphon/config/psiphon.config')
 CONTAINER='vps-psiphon'
 PROXY='127.0.0.1:40000'  # Updated from settings / --port in main()
 STATE=DATA/'state.json'
+ENV_FILE=Path('/etc/default/vps-psiphon')
 
 def log(message):
     print(dt.datetime.now().astimezone().isoformat(timespec='seconds'),message,flush=True)
@@ -54,6 +56,64 @@ def change_config(updates):
     if not isinstance(obj,dict):raise RuntimeError('Invalid Psiphon configuration')
     obj.update(updates)
     atomic_json(CONFIG,obj)
+
+def backend():
+    value=(read_json(DATA/'settings.json',{}) or {}).get('backend','console')
+    if value not in ('console','vps-psiphon'):raise RuntimeError('Invalid saved backend')
+    return value
+
+def tunnel_action(action):
+    # A --rm container owned by systemd cannot be stopped/restarted via Docker:
+    # systemd would race discovery and reopen BoltDB while the exporter reads it.
+    if backend()=='vps-psiphon':
+        return run(['systemctl',action,'vps-psiphon.service'],timeout=120)
+    return run(['docker',action,CONTAINER],timeout=90)
+
+def update_region_env(region):
+    if backend()!='vps-psiphon':return
+    path=ENV_FILE
+    lines=path.read_text().splitlines()
+    lines=[line for line in lines if line.split('=',1)[0] not in ('EGRESS_REGION','REGION_POOL')]
+    # Same-directory atomic replacement, retaining owner/mode of the env file.
+    st=path.stat();name=None
+    try:
+        with tempfile.NamedTemporaryFile('w',dir=path.parent,delete=False) as f:
+            name=f.name
+            f.write('\n'.join(lines+[f'EGRESS_REGION={region}',"REGION_POOL=''"])+ '\n')
+            f.flush();os.fsync(f.fileno())
+        os.chown(name,st.st_uid,st.st_gid);os.chmod(name,st.st_mode & 0o777)
+        os.replace(name,path)
+    finally:
+        if name and os.path.exists(name):os.unlink(name)
+
+def set_region(region,wait):
+    """Persist region, discard the old target and reconnect under the writer lock."""
+    settings=read_json(DATA/'settings.json',{}) or {}
+    config=read_json(CONFIG)
+    if not isinstance(config,dict):raise RuntimeError('Invalid Psiphon configuration')
+    env_matches=True
+    if backend()=='vps-psiphon':
+        values=[shlex.split(line.split('=',1)[1],comments=True)
+                for line in ENV_FILE.read_text().splitlines() if line.startswith('EGRESS_REGION=')]
+        env_matches=(values==[[region]] if region else values==[[]] or values==[['']])
+    if env_matches and settings.get('region','')==region and config.get('EgressRegion','')==region:
+        log(f'Region already {region or "AUTO"}; tunnel unchanged')
+        return
+    stamp=dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S-%f')
+    backup=DATA/f'region-backup-{stamp}'
+    backup.mkdir(mode=0o700)
+    for path in (CONFIG,DATA/'settings.json',STATE,CACHE):
+        if path.is_file():shutil.copy2(path,backup/path.name)
+    if backend()=='vps-psiphon':
+        shutil.copy2(ENV_FILE,backup/'vps-psiphon')
+    update_region_env(region)
+    change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':1})
+    settings['region']=region
+    atomic_json(DATA/'settings.json',settings)
+    STATE.unlink(missing_ok=True);CACHE.unlink(missing_ok=True)
+    log(f'Region saved: {region or "AUTO"}; backup={backup}; reconnecting')
+    docker_restart(wait)
+    log('SOCKS5 tunnel ready; the monitor will check Google/Gemini separately')
 
 def socks_ip():
     # Explicit SOCKS5h proxy, remote DNS, no direct fallback or proxy bypass.
@@ -211,7 +271,7 @@ def pin_prepared_verification(region,ip,geo,diag,reason,state):
     return False
 
 def docker_restart(wait):
-    run(['docker','restart',CONTAINER],timeout=90)
+    tunnel_action('restart')
     deadline=time.monotonic()+wait;error='unknown'
     while time.monotonic()<deadline:
         try:return socks_ip()
@@ -221,7 +281,7 @@ def docker_restart(wait):
 def collect_candidates(region):
     # BoltDB is read only with the container stopped; always start it again.
     log('Exporting distinct server entries from read-only BoltDB...')
-    run(['docker','stop',CONTAINER],timeout=90)
+    tunnel_action('stop')
     try:
         raw=run([str(BASE/'psiphon-server-export'),str(db_path()),region],timeout=120)
         rows=[json.loads(line) for line in raw.splitlines() if line.strip()]
@@ -231,12 +291,13 @@ def collect_candidates(region):
         log(f'Loaded {len(rows)} distinct servers')
         return rows
     finally:
-        run(['docker','start',CONTAINER],timeout=90)
+        tunnel_action('start')
 
 def apply_candidate(candidate,region):
     change_config({'EgressRegion':region,'TargetServerEntry':candidate['encoded'],'TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True,'DisableTactics':False})
 
 def clear_target(region):
+    update_region_env(region)
     change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True,'DisableTactics':False})
 
 def verify_pin_current(region,gemini=False,mb=0,strict=False):
@@ -254,6 +315,11 @@ def verify_pin_current(region,gemini=False,mb=0,strict=False):
 
 def search(region,wait,delay,gemini=False,mb=0,strict=False):
     log(f'Server rotation started: {region or "AUTO"}; unlimited cycles')
+    # A CLI region override must take effect before accepting the current exit.
+    if (read_json(CONFIG,{}) or {}).get('EgressRegion','')!=region:
+        clear_target(region)
+        STATE.unlink(missing_ok=True)
+        docker_restart(wait)
     # Preserve a known good pin without needless restart.
     try:
         if verify_pin_current(region,gemini,mb,strict):return True
@@ -318,7 +384,7 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
         seen_exits.clear()
 
 def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
-    log(f'Monitor v3.4: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
+    log(f'Monitor v3.5: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
     failures=0
     while True:
         try:
@@ -383,8 +449,8 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
         time.sleep(interval)
 
 def main():
-    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.4')
-    ap.add_argument('command',choices=['check','search','monitor','status','refresh-cache','prepare-pin'])
+    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.5')
+    ap.add_argument('command',choices=['check','search','monitor','status','refresh-cache','prepare-pin','set-region'])
     ap.add_argument('--region',default=None)
     ap.add_argument('--allow-interruption',action='store_true',help='Required for refresh-cache (briefly stops Psiphon)')
     ap.add_argument('--port',type=int,default=None)
@@ -398,6 +464,7 @@ def main():
     ap.add_argument('--no-strict-region',dest='strict_region',action='store_false')
     ap.add_argument('--fail-threshold',type=int,default=None)
     args=ap.parse_args()
+    if args.command=='set-region' and args.region is None:ap.error('set-region requires --region CC|AUTO')
     settings=read_json(DATA/'settings.json',{}) or {}
     # settings.json stores the effective service configuration for status and CLI.
     # Explicit CLI arguments still win over persisted settings.
@@ -415,36 +482,46 @@ def main():
     if args.interval<60 or args.wait<20 or args.delay<2:ap.error('interval>=60 wait>=20 delay>=2')
     if not 0<=args.probe_mb<=10 or not 2<=args.fail_threshold<=20:ap.error('probe-mb 0..10, fail-threshold 2..20')
     if args.command=='status':
-        print(json.dumps({'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
+        print(json.dumps({'backend':backend(),'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
     if args.command=='check':
-        _,geo=probe()
-        verdict=gemini_verdict(args.gemini_check)
-        return 2 if geo=='RU' or verdict=='REFUSED' else 0
+        *_,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
+        return 2 if reason else 0
     DATA.mkdir(parents=True,exist_ok=True)
-    with (DATA/'lock').open('w') as f:
-        try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError:raise RuntimeError('Another search/monitor is running')
-        if args.command=='refresh-cache':
-            # Explicit operator action with an interruption: stop, export, start.
-            # Never claim this happens without a connection interruption.
-            if not args.allow_interruption:
-                raise RuntimeError('refresh-cache interrupts Psiphon; repeat with --allow-interruption')
-            collect_candidates(region)
-            log('Candidate cache refreshed; Psiphon container restarted (tunnel may change)')
-        elif args.command=='prepare-pin':
-            ip,geo,verdict,speed,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
-            if reason:raise RuntimeError(f'Exit is not eligible for pin staging: {reason}')
-            state=read_json(STATE,{}) or {}
-            diag=connected_id()
-            if not state or state.get('ip')!=ip or state.get('diagnostic_id')!=diag:
-                adopt_current(region,args.gemini_check,args.probe_mb,args.strict_region,
-                              observed=(ip,geo,verdict,speed,reason))
-            if not prepare_current_pin(region,ip,geo,diag):
-                log('No unique cached matching server (or pin already prepared); tunnel untouched')
-        elif args.command=='search':
-            search(region,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region)
-        else:
-            monitor(region,args.interval,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region,args.fail_threshold)
+    resume_monitor=False
+    if args.command=='set-region':
+        active=subprocess.run(['systemctl','is-active','--quiet','psiphon-autopin.service']).returncode==0
+        if active:
+            run(['systemctl','stop','psiphon-autopin.service'],timeout=120)
+            resume_monitor=True
+    try:
+        with (DATA/'lock').open('w') as f:
+            try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise RuntimeError('Another search/monitor is running')
+            if args.command=='set-region':
+                set_region(region,args.wait)
+            elif args.command=='refresh-cache':
+                # Explicit operator action with an interruption: stop, export, start.
+                # Never claim this happens without a connection interruption.
+                if not args.allow_interruption:
+                    raise RuntimeError('refresh-cache interrupts Psiphon; repeat with --allow-interruption')
+                collect_candidates(region)
+                log('Candidate cache refreshed; Psiphon container restarted (tunnel may change)')
+            elif args.command=='prepare-pin':
+                ip,geo,verdict,speed,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
+                if reason:raise RuntimeError(f'Exit is not eligible for pin staging: {reason}')
+                state=read_json(STATE,{}) or {}
+                diag=connected_id()
+                if not state or state.get('ip')!=ip or state.get('diagnostic_id')!=diag:
+                    adopt_current(region,args.gemini_check,args.probe_mb,args.strict_region,
+                                  observed=(ip,geo,verdict,speed,reason))
+                if not prepare_current_pin(region,ip,geo,diag):
+                    log('No unique cached matching server (or pin already prepared); tunnel untouched')
+            elif args.command=='search':
+                search(region,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region)
+            else:
+                monitor(region,args.interval,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region,args.fail_threshold)
+    finally:
+        if resume_monitor:run(['systemctl','start','psiphon-autopin.service'],timeout=120)
     return 0
 
 if __name__=='__main__':
