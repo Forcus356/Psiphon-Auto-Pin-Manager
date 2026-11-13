@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Forcus Psiphon Auto-Pin Manager v3.4.1
+# Forcus Psiphon Auto-Pin Manager v3.4.2
 # Author: https://github.com/Forcus356
 # Ubuntu/Debian x86_64
 set -Eeuo pipefail
@@ -63,7 +63,7 @@ REGION=${REGION^^}
 [[ $REGION == AUTO ]] && REGION=''
 mkdir -p "$ROOT" "$CONF" "$APP" "$DATA"
 chmod 700 "$DATA"
-echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v3.4.1"
+echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v3.4.2"
 
 # Stop old writer before updating executable/config. This does not stop the VPN container.
 systemctl stop psiphon-autopin.service 2>/dev/null || true
@@ -390,7 +390,7 @@ python3 -m py_compile "$APP/gemini_probe.py"
 
 cat > "$APP/psiphon_autopin.py" <<'PY_MANAGER'
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v3.4: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v3.4.2: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import datetime as dt
 import fcntl
@@ -521,6 +521,7 @@ def adopt_current(region,gemini,mb,strict,observed=None):
         'speed_kib_s':speed,'adopted_unpinned':True,
         'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
     log(f'ADOPTED HEALTHY exit={ip} Google={geo} Gemini={verdict} ID={diag}; no restart (not targeted pin)')
+    prepare_current_pin(region,ip,geo,diag)
     return True
 
 def started_at():
@@ -541,6 +542,65 @@ def db_path():
     if len(matches)!=1:raise RuntimeError(f'Expected exactly one BoltDB, got {len(matches)}')
     return matches[0]
 
+# A candidate snapshot is obtained ONLY when Psiphon is already stopped as
+# part of normal server discovery. Never open/copy a live BoltDB for staging.
+CACHE=DATA/'server-entry-cache.json'
+
+def cache_candidates(rows,region):
+    # TargetServerEntry contains server credentials. Store only under mode 0600.
+    atomic_json(CACHE, {'region':region,'entries':rows,
+        'cached_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+
+def candidate_for_connected_server(diag,region):
+    cache=read_json(CACHE,{}) or {}
+    if cache.get('region')!=region:return None
+    rows=[r for r in cache.get('entries',[]) if r.get('diagnostic')==diag and
+          (not region or r.get('region')==region) and r.get('encoded') and r.get('server_ip')]
+    # Diagnostic IDs are shortened tags, so do not silently choose between collisions.
+    if len(rows)!=1:return None
+    return rows[0]
+
+def prepare_current_pin(region,ip,geo,diag):
+    """Write next-start target without touching the running tunnel.
+
+    This is staged, NOT verified. We intentionally don't restart ConsoleClient.
+    """
+    cfg=read_json(CONFIG,{}) or {}
+    state=read_json(STATE,{}) or {}
+    if cfg.get('TargetServerEntry') or state.get('pin_prepared'):return False
+    candidate=candidate_for_connected_server(diag,region)
+    if candidate is None:return False
+    # Recheck the exit and diagnostic ID across the staging boundary.
+    if socks_ip()!=ip or connected_id()!=diag:return False
+    running_since=started_at()
+    change_config({'TargetServerEntry':candidate['encoded'], 'EgressRegion':region,
+                   'TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True})
+    state.update(server_ip=candidate['server_ip'],adopted_unpinned=True,
+                 pin_prepared=True,prepared_container_started_at=running_since)
+    atomic_json(STATE,state)
+    log(f'PIN PREPARED: ID={diag}, server={candidate["server_ip"]}; '
+        'takes effect on next Psiphon restart; current tunnel unchanged')
+    return True
+
+def pin_prepared_verification(region,ip,geo,diag,reason,state):
+    """Promote staged pin only after a NEW container instance has confirmed it."""
+    if not state.get('pin_prepared'):return False
+    if started_at()==state.get('prepared_container_started_at'):
+        log(f'Prepared pin pending next restart: {ip} Google={geo}; current tunnel unchanged')
+        return True
+    if not reason and ip==state.get('ip') and diag==state.get('diagnostic_id'):
+        state.update(pin_prepared=False,adopted_unpinned=False,
+                     verified_at=dt.datetime.now(dt.timezone.utc).isoformat())
+        state.pop('prepared_container_started_at',None)
+        atomic_json(STATE,state)
+        log(f'PIN VERIFIED AFTER RESTART: exit={ip} Google={geo} ID={diag}')
+        return True
+    # A prepared target failed to restore the previous verified exit.
+    # Do not claim it was pinned; the monitor can run normal recovery.
+    log(f'Prepared pin mismatch after restart: current={ip}/{diag}; '
+        f'expected={state.get("ip")}/{state.get("diagnostic_id")}')
+    return False
+
 def docker_restart(wait):
     run(['docker','restart',CONTAINER],timeout=90)
     deadline=time.monotonic()+wait;error='unknown'
@@ -558,6 +618,7 @@ def collect_candidates(region):
         rows=[json.loads(line) for line in raw.splitlines() if line.strip()]
         rows=[v for v in rows if v.get('server_ip') and v.get('diagnostic') and v.get('encoded')]
         if not rows:raise RuntimeError(f'No known servers in region {region or "AUTO"}')
+        cache_candidates(rows,region)
         log(f'Loaded {len(rows)} distinct servers')
         return rows
     finally:
@@ -572,6 +633,7 @@ def clear_target(region):
 def verify_pin_current(region,gemini=False,mb=0,strict=False):
     state=read_json(STATE,{}) or {}
     config=read_json(CONFIG,{}) or {}
+    if state.get('pin_prepared'):return False
     if state.get('region')!=region or not state.get('ip') or not config.get('TargetServerEntry'):
         return False
     ip,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
@@ -656,6 +718,11 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
             config=read_json(CONFIG,{}) or {}
             diag=connected_id()
             changed=bool(state) and (ip!=state.get('ip') or diag!=state.get('diagnostic_id'))
+            if not reason and state.get('pin_prepared') and config.get('TargetServerEntry'):
+                if pin_prepared_verification(region,ip,geo,diag,reason,state):
+                    failures=0
+                    time.sleep(interval)
+                    continue
             if reason:
                 log(f'Bad exit: {reason}; verifying before rotation')
                 # Confirm decisive refusals to avoid spurious reboots.
@@ -684,6 +751,8 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
                     state.update(google_region=geo, gemini=verdict, speed_kib_s=speed,
                                  verified_at=dt.datetime.now(dt.timezone.utc).isoformat())
                     atomic_json(STATE,state)
+                if state.get('adopted_unpinned') and not config.get('TargetServerEntry'):
+                    prepare_current_pin(region,ip,geo,diag)
                 log(f'Healthy exit unchanged: {ip} Google={geo} Gemini={verdict}; '
                     + ('adopted (not pinned)' if state.get('adopted_unpinned') else 'pinned'))
         except Exception as exc:
@@ -706,8 +775,9 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
 
 def main():
     ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.4')
-    ap.add_argument('command',choices=['check','search','monitor','status'])
+    ap.add_argument('command',choices=['check','search','monitor','status','refresh-cache','prepare-pin'])
     ap.add_argument('--region',default=None)
+    ap.add_argument('--allow-interruption',action='store_true',help='Required for refresh-cache (briefly stops Psiphon)')
     ap.add_argument('--port',type=int,default=None)
     ap.add_argument('--interval',type=int,default=3600)
     ap.add_argument('--wait',type=int,default=75)
@@ -745,8 +815,27 @@ def main():
     with (DATA/'lock').open('w') as f:
         try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:raise RuntimeError('Another search/monitor is running')
-        if args.command=='search':search(region,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region)
-        else:monitor(region,args.interval,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region,args.fail_threshold)
+        if args.command=='refresh-cache':
+            # Explicit operator action with an interruption: stop, export, start.
+            # Never claim this happens without a connection interruption.
+            if not args.allow_interruption:
+                raise RuntimeError('refresh-cache interrupts Psiphon; repeat with --allow-interruption')
+            collect_candidates(region)
+            log('Candidate cache refreshed; Psiphon container restarted (tunnel may change)')
+        elif args.command=='prepare-pin':
+            ip,geo,verdict,speed,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
+            if reason:raise RuntimeError(f'Exit is not eligible for pin staging: {reason}')
+            state=read_json(STATE,{}) or {}
+            diag=connected_id()
+            if not state or state.get('ip')!=ip or state.get('diagnostic_id')!=diag:
+                adopt_current(region,args.gemini_check,args.probe_mb,args.strict_region,
+                              observed=(ip,geo,verdict,speed,reason))
+            if not prepare_current_pin(region,ip,geo,diag):
+                log('No unique cached matching server (or pin already prepared); tunnel untouched')
+        elif args.command=='search':
+            search(region,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region)
+        else:
+            monitor(region,args.interval,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region,args.fail_threshold)
     return 0
 
 if __name__=='__main__':
@@ -770,7 +859,7 @@ if (( GEMINI_CHECK )); then EXTRA_FLAGS="$EXTRA_FLAGS --gemini-check"; fi
 if (( STRICT_REGION )); then EXTRA_FLAGS="$EXTRA_FLAGS --strict-region"; fi
 cat > /etc/systemd/system/psiphon-autopin.service <<EOF
 [Unit]
-Description=Forcus Psiphon Auto-Pin v3.4.1 server rotation and Google geo monitor
+Description=Forcus Psiphon Auto-Pin v3.4.2 server rotation and Google geo monitor
 Wants=network-online.target
 After=network-online.target docker.service
 Requires=docker.service
@@ -807,7 +896,7 @@ fi
 systemctl daemon-reload
 systemctl enable psiphon-autopin.service
 systemctl restart psiphon-autopin.service
-printf '\n[OK] Forcus Psiphon Auto-Pin v3.4.1 installed\n'
+printf '\n[OK] Forcus Psiphon Auto-Pin v3.4.2 installed\n'
 echo '[OK] Existing healthy unpinned exits are retained; targeted pinning remains available.'
 echo "[OK] Gemini checks: $GEMINI_CHECK; optional throughput sample: ${PROBE_MB} MiB; strict region: $STRICT_REGION."
 echo "[OK] SOCKS5h: 127.0.0.1:$SOCKS_PORT (Google and IP checks through proxy)."
