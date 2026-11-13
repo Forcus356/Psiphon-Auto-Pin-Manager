@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Forcus Psiphon Auto-Pin Manager v3.3.1
+# Forcus Psiphon Auto-Pin Manager v3.4.0
 # Author: https://github.com/Forcus356
 # Ubuntu/Debian x86_64
 set -Eeuo pipefail
@@ -12,6 +12,7 @@ export DEBIAN_FRONTEND=noninteractive
 ROOT=/opt/vps-psiphon; CONF="$ROOT/config"; APP=/opt/psiphon-autopin
 DATA=/var/lib/psiphon-autopin; CONTAINER=vps-psiphon
 REGION=''; INTERVAL=3600; WAIT=75; DELAY=12; SOCKS_PORT=''
+GEMINI_CHECK=0; PROBE_MB=0; FAIL_THRESHOLD=3; STRICT_REGION=0
 PORT_EXPLICIT=0
 while (($#)); do
     case "$1" in
@@ -20,7 +21,12 @@ while (($#)); do
         --interval) INTERVAL=${2:?Missing interval}; shift 2 ;;
         --wait) WAIT=${2:?Missing wait}; shift 2 ;;
         --delay) DELAY=${2:?Missing delay}; shift 2 ;;
-        --help) echo 'Usage: install_psiphon_autopin.sh [--region DE|AUTO] [--port 40000] [--interval 3600] [--wait 75] [--delay 12]'; exit 0 ;;
+        --gemini-check) GEMINI_CHECK=1; shift ;;
+        --no-gemini-check) GEMINI_CHECK=0; shift ;;
+        --strict-region) STRICT_REGION=1; shift ;;
+        --probe-mb) PROBE_MB=${2:?Missing MB}; shift 2 ;;
+        --fail-threshold) FAIL_THRESHOLD=${2:?Missing threshold}; shift 2 ;;
+        --help) echo 'Usage: install_psiphon_autopin.sh [--region DE|AUTO] [--port 40000] [--interval 3600] [--wait 75] [--delay 12] [--gemini-check] [--probe-mb 0..10] [--strict-region] [--fail-threshold 3]'; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -51,11 +57,13 @@ HTTP_PORT=$((SOCKS_PORT + 1))
 REGION=${REGION^^}
 [[ $REGION == AUTO || $REGION =~ ^[A-Z]{2}$ ]] || { echo 'Invalid country' >&2; exit 2; }
 [[ $INTERVAL =~ ^[0-9]+$ && $WAIT =~ ^[0-9]+$ && $DELAY =~ ^[0-9]+$ ]] || exit 2
+[[ $PROBE_MB =~ ^[0-9]+$ && $FAIL_THRESHOLD =~ ^[0-9]+$ ]] || { echo 'Invalid probe size or failure threshold' >&2; exit 2; }
+(( PROBE_MB <= 10 && FAIL_THRESHOLD >= 2 && FAIL_THRESHOLD <= 20 )) || { echo 'Require --probe-mb 0..10, --fail-threshold 2..20' >&2; exit 2; }
 (( INTERVAL >= 60 && WAIT >= 20 && DELAY >= 2 )) || { echo 'Require interval>=60, wait>=20, delay>=2' >&2; exit 2; }
 [[ $REGION == AUTO ]] && REGION=''
 mkdir -p "$ROOT" "$CONF" "$APP" "$DATA"
 chmod 700 "$DATA"
-echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v3.3.1"
+echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v3.4.0"
 
 # Stop old writer before updating executable/config. This does not stop the VPN container.
 systemctl stop psiphon-autopin.service 2>/dev/null || true
@@ -94,7 +102,17 @@ port_occupied() {
 
 if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
     [[ -f $CONF/psiphon.config ]] || { echo "Missing $CONF/psiphon.config" >&2; exit 1; }
-    echo '[INFO] Existing Psiphon container preserved.'
+    # Never adopt a foreign container with the same name: legacy installations
+    # commonly publish 40000:1080 and ignore the new port in the JSON.
+    IMAGE=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER")
+    NETMODE=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CONTAINER")
+    MOUNT_OK=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Source}}{{end}}{{end}}' "$CONTAINER")
+    if [[ "$IMAGE" != 'local-psiphon-console:latest' || "$NETMODE" != 'host' || "$MOUNT_OK" != "$CONF" ]]; then
+        echo "[ERROR] Existing $CONTAINER is not ours (image=$IMAGE network=$NETMODE mount=$MOUNT_OK)." >&2
+        echo '[ERROR] Stop legacy psiphon services and migrate explicitly; no container was replaced.' >&2
+        exit 1
+    fi
+    echo '[INFO] Existing compatible Psiphon container preserved.'
     CURRENT_SOCKS_PORT=$(python3 - "$CONF/psiphon.config" <<'PYOLDPORT'
 import json,sys
 print(json.load(open(sys.argv[1])).get('LocalSocksProxyPort',40000))
@@ -307,9 +325,72 @@ if [[ ! -x "$APP/psiphon-server-export" || "$APP/psiphon-server-export.go" -nt "
     chmod 700 "$APP/psiphon-server-export"
 fi
 
+# A conservative, anonymous Gemini availability check through the pinned SOCKS5h exit.
+# Only an explicit error 1060 is REFUSED. Changed web internals/errors => INCONCLUSIVE.
+# There is no direct-connect fallback. Test request is deliberately low-volume.
+cat > "$APP/gemini_probe.py" <<'PY_GEMINI'
+#!/usr/bin/env python3
+"""Unauthenticated Gemini availability probe. Exit 0 served, 1 refused, 2 inconclusive."""
+import argparse
+import http.cookiejar
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+from urllib.parse import urlencode
+
+APP='https://gemini.google.com/app'
+ENDPOINT='https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate'
+
+def curl(args, timeout=90):
+    try:
+        p=subprocess.run(['curl','-4','-sS','--max-time',str(timeout),*args],
+                         capture_output=True, text=True, timeout=timeout+5)
+        return p.returncode,p.stdout,p.stderr
+    except (OSError,subprocess.TimeoutExpired) as e:
+        return 1,'',str(e)
+
+def check(port):
+    proxy=f'socks5h://127.0.0.1:{port}'
+    with tempfile.TemporaryDirectory(prefix='gemini-check-') as tmp:
+        jar=str(Path(tmp)/'cookies')
+        common=['--noproxy','','--proxy',proxy,'-A','Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+                '-H','Accept-Language: en-US,en;q=0.9','-b',jar,'-c',jar]
+        rc,page,err=curl([*common,APP],timeout=30)
+        if rc:return 'INCONCLUSIVE',f'page fetch failed: {err[-120:]}'
+        # Fields are from the public, unauthenticated application page.
+        bl=re.search(r'"cfb2h":"([^"\\]+)"',page)
+        sid=re.search(r'"FdrFJe":"([^"\\]+)"',page)
+        if not bl or not sid:return 'INCONCLUSIVE','session fields absent; Google page may have changed'
+        query=urlencode({'bl':bl.group(1),'f.sid':sid.group(1),'hl':'en','_reqid':'100000','rt':'c'})
+        req='f.req=[null,"[[\\"hi\\"],null,null]"]'
+        rc,out,err=curl([*common,'-H','Content-Type: application/x-www-form-urlencoded;charset=utf-8',
+                          '-H','Origin: https://gemini.google.com','-H','Referer: https://gemini.google.com/',
+                          '--data-urlencode',req,ENDPOINT+'?'+query],timeout=90)
+        if rc:return 'INCONCLUSIVE',f'request failed: {err[-120:]}'
+        if re.search(r'BardErrorInfo\\?\",\\?\[1060(?:\D|$)',out):return 'REFUSED','Gemini error 1060'
+        # Do not count a 200 HTML page, captcha or generic response as a successful model reply.
+        if re.search(r'SWML_DESCRIPTION',out) and 'wrb.fr' in out:
+            return 'SERVING','anonymous model reply detected'
+        return 'INCONCLUSIVE','no explicit Gemini verdict'
+
+if __name__=='__main__':
+    ap=argparse.ArgumentParser()
+    ap.add_argument('--port',type=int,required=True)
+    a=ap.parse_args()
+    if not 1024<=a.port<=65534:ap.error('invalid port')
+    verdict,reason=check(a.port)
+    print(f'{verdict}: {reason}',flush=True)
+    sys.exit({'SERVING':0,'REFUSED':1,'INCONCLUSIVE':2}[verdict])
+PY_GEMINI
+chmod 700 "$APP/gemini_probe.py"
+python3 -m py_compile "$APP/gemini_probe.py"
+
 cat > "$APP/psiphon_autopin.py" <<'PY_MANAGER'
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v3.3: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v3.4: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import datetime as dt
 import fcntl
@@ -393,6 +474,55 @@ def probe():
     log(f'Exit={last}, Google={country} [SOCKS5h]')
     return last,country
 
+def gemini_verdict(enabled):
+    """Report only explicit refusal; never treat inconclusive as bad exit."""
+    if not enabled:return 'DISABLED'
+    port=PROXY.rsplit(':',1)[1]
+    p=subprocess.run(['python3',str(BASE/'gemini_probe.py'),'--port',port],
+                     stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=130)
+    label={0:'SERVING',1:'REFUSED',2:'INCONCLUSIVE'}.get(p.returncode,'INCONCLUSIVE')
+    log('Gemini '+label+': '+(p.stdout or p.stderr).strip()[-180:])
+    return label
+
+def speed_probe(mb):
+    """Optional single-download measurement. Never used as the sole rotation reason."""
+    if mb<=0:return None
+    url=f'https://speed.cloudflare.com/__down?bytes={mb*1048576}'
+    cmd=['curl','-4','-fsS','--noproxy','','--proxy',f'socks5h://{PROXY}',
+         '--connect-timeout','8','--max-time','50','-o','/dev/null',
+         '-w','%{speed_download}',url]
+    out=run(cmd,timeout=55).strip()
+    kbps=round(float(out)/1024,1)
+    log(f'Speed probe: {kbps} KiB/s, sample={mb} MiB')
+    return kbps
+
+def evaluate_exit(region, gemini, mb, strict=False):
+    ip,geo=probe()
+    verdict=gemini_verdict(gemini)
+    speed=None
+    if mb:
+        try:speed=speed_probe(mb)
+        except Exception as exc:log('Optional speed sample failed: '+str(exc))
+    # Google classifications can differ from the server's requested country.
+    # In strict mode reject *confirmed* mismatch, not an inconclusive Gemini reply.
+    reason=('Google=RU' if geo=='RU' else 'Gemini REFUSED' if verdict=='REFUSED' else
+            f'Google={geo} != requested {region}' if strict and region and geo!=region else '')
+    return ip,geo,verdict,speed,reason
+
+def adopt_current(region,gemini,mb,strict):
+    """Leave an already healthy connection alone; do not claim it's pinned to a DB entry."""
+    config=read_json(CONFIG,{}) or {}
+    if config.get('TargetServerEntry'):return False
+    ip,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
+    if reason:return False
+    diag=connected_id()
+    atomic_json(STATE,{'region':region,'ip':ip,'google_region':geo,
+        'diagnostic_id':diag,'server_ip':None,'gemini':verdict,
+        'speed_kib_s':speed,'adopted_unpinned':True,
+        'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+    log(f'ADOPTED HEALTHY exit={ip} Google={geo} Gemini={verdict} ID={diag}; no restart (not targeted pin)')
+    return True
+
 def started_at():
     return run(['docker','inspect','-f','{{.State.StartedAt}}',CONTAINER]).strip()
 
@@ -439,23 +569,24 @@ def apply_candidate(candidate,region):
 def clear_target(region):
     change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True,'DisableTactics':False})
 
-def verify_pin_current(region):
+def verify_pin_current(region,gemini=False,mb=0,strict=False):
     state=read_json(STATE,{}) or {}
     config=read_json(CONFIG,{}) or {}
     if state.get('region')!=region or not state.get('ip') or not config.get('TargetServerEntry'):
         return False
-    ip,geo=probe()
+    ip,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
     diag=connected_id()
-    if ip==state['ip'] and geo!='RU' and diag==state.get('diagnostic_id'):
+    if ip==state['ip'] and not reason and diag==state.get('diagnostic_id'):
         log(f'Existing pin healthy: {ip}, {geo}, server={diag}')
         return True
     return False
 
-def search(region,wait,delay):
+def search(region,wait,delay,gemini=False,mb=0,strict=False):
     log(f'Server rotation started: {region or "AUTO"}; unlimited cycles')
     # Preserve a known good pin without needless restart.
     try:
-        if verify_pin_current(region):return True
+        if verify_pin_current(region,gemini,mb,strict):return True
+        if adopt_current(region,gemini,mb,strict):return True
     except Exception as e:log(f'Existing pin check failed: {e}')
     # Remove old target before discovery. No automatic return to RU state.
     clear_target(region)
@@ -488,19 +619,21 @@ def search(region,wait,delay):
                 if exit_ip in seen_exits:
                     log(f'Exit {exit_ip} already rejected in this search; skipping')
                     continue
-                first,geo=probe()
+                first,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
                 if first!=exit_ip:raise RuntimeError(f'Exit IP changed: {exit_ip} -> {first}')
-                if geo=='RU':
+                if reason:
                     seen_exits.add(first)
-                    log(f'Rejected exit {first}: Google=RU')
+                    log(f'Rejected exit {first}: {reason}')
                     continue
-                # Double-check Google after a short delay, through the same SOCKS5 tunnel.
+                # Recheck IP/geo, without an unnecessary second Gemini request.
                 time.sleep(5)
                 second,geo2=probe()
-                if second!=first or geo2=='RU' or connected_id()!=expected:
+                if second!=first or geo2=='RU' or (strict and region and geo2!=region) or connected_id()!=expected:
                     raise RuntimeError(f'Pin verification unstable: {second} Google={geo2}')
-                atomic_json(STATE,{'ip':first,'google_region':geo2,'region':region,'diagnostic_id':expected,'server_ip':server,'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
-                log(f'PIN VERIFIED: exit={first} Google={geo2} server={server} ID={expected}')
+                atomic_json(STATE,{'ip':first,'google_region':geo2,'region':region,'diagnostic_id':expected,
+                                   'server_ip':server,'gemini':verdict,'speed_kib_s':speed,
+                                   'adopted_unpinned':False,'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+                log(f'PIN VERIFIED: exit={first} Google={geo2} Gemini={verdict} server={server} ID={expected}')
                 return True
             except Exception as exc:
                 log(f'Server {server} failed: {exc}')
@@ -513,43 +646,71 @@ def search(region,wait,delay):
         # After a full cycle, the same exit could have been reclassified by Google.
         seen_exits.clear()
 
-def monitor(region,interval,wait,delay):
-    log(f'Monitor started: region={region or "AUTO"}, interval={interval}s')
+def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
+    log(f'Monitor v3.4: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
+    failures=0
     while True:
         try:
-            ip,geo=probe()
+            ip,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
             state=read_json(STATE,{}) or {}
             config=read_json(CONFIG,{}) or {}
-            wrong_region=state.get('region')!=region
-            missing_pin=not state.get('ip') or not config.get('TargetServerEntry')
-            changed=(not missing_pin and (ip!=state.get('ip') or connected_id()!=state.get('diagnostic_id')))
-            if geo=='RU':
-                log('Google=RU; checking again before rotation')
-                time.sleep(15)
-                _,confirm=probe()
-                if confirm=='RU':
-                    log('RU confirmed; switching to a different server')
-                    search(region,wait,delay)
-            elif wrong_region or missing_pin or changed:
-                log('No matching verified pin; starting controlled server selection')
-                search(region,wait,delay)
-            else:log('Healthy pinned SOCKS exit; unchanged')
-        except Exception as e:
-            log(f'CHECK UNKNOWN / outage: {e} (not treated as RU)')
-            state=read_json(STATE,{}) or {}
-            if not state.get('ip'):
-                try:search(region,wait,delay)
-                except Exception as inner:log(f'Search failed: {inner}')
+            diag=connected_id()
+            changed=bool(state) and (ip!=state.get('ip') or diag!=state.get('diagnostic_id'))
+            if reason:
+                log(f'Bad exit: {reason}; verifying before rotation')
+                # Confirm decisive refusals to avoid spurious reboots.
+                time.sleep(10)
+                ip2,geo2,verdict2,_,reason2=evaluate_exit(region,gemini,0,strict)
+                if reason2 and ip2==ip:
+                    log(f'Confirmed bad exit ({reason2}); starting search')
+                    search(region,wait,delay,gemini,mb,strict)
+                else:log('Second check recovered/inconclusive: preserving connection')
+                failures=0
+            elif not state or (not config.get('TargetServerEntry') and not state.get('adopted_unpinned')):
+                # Existing working tunnel is useful even without TargetServerEntry.
+                adopt_current(region,False,0,strict)
+                failures=0
+            elif changed or state.get('region')!=region:
+                log('Exit/region changed; evaluating current healthy exit')
+                if not config.get('TargetServerEntry'):
+                    adopt_current(region,False,0,strict)
+                else:
+                    search(region,wait,delay,gemini,mb,strict)
+                failures=0
+            else:
+                failures=0
+                log(f'Healthy exit unchanged: {ip} Google={geo} Gemini={verdict}; '
+                    + ('adopted (not pinned)' if state.get('adopted_unpinned') else 'pinned'))
+        except Exception as exc:
+            failures+=1
+            log(f'UNKNOWN/OUTAGE {failures}/{threshold}: {exc}; no RU inference')
+            if failures>=threshold:
+                log('Consecutive failures reached threshold; recovering connection')
+                try:
+                    docker_restart(wait)
+                    # Only run rotation if the restarted tunnel is still unusable.
+                    ip,geo,verdict,_,reason=evaluate_exit(region,gemini,0,strict)
+                    if reason:
+                        search(region,wait,delay,gemini,mb,strict)
+                    else:
+                        log(f'Recovered without full search: {ip} Google={geo} Gemini={verdict}')
+                except Exception as e:
+                    log(f'Recovery incomplete: {e}; defer next attempt')
+                failures=0
         time.sleep(interval)
 
 def main():
-    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.3')
+    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.4')
     ap.add_argument('command',choices=['check','search','monitor','status'])
     ap.add_argument('--region',default=None)
     ap.add_argument('--port',type=int,default=None)
     ap.add_argument('--interval',type=int,default=3600)
     ap.add_argument('--wait',type=int,default=75)
     ap.add_argument('--delay',type=int,default=12)
+    ap.add_argument('--gemini-check',action='store_true')
+    ap.add_argument('--probe-mb',type=int,default=0)
+    ap.add_argument('--strict-region',action='store_true')
+    ap.add_argument('--fail-threshold',type=int,default=3)
     args=ap.parse_args()
     settings=read_json(DATA/'settings.json',{}) or {}
     region=(args.region if args.region is not None else settings.get('region','')).upper()
@@ -560,16 +721,19 @@ def main():
     if region=='AUTO':region=''
     if region and not re.fullmatch('[A-Z]{2}',region):ap.error('invalid country')
     if args.interval<60 or args.wait<20 or args.delay<2:ap.error('interval>=60 wait>=20 delay>=2')
+    if not 0<=args.probe_mb<=10 or not 2<=args.fail_threshold<=20:ap.error('probe-mb 0..10, fail-threshold 2..20')
     if args.command=='status':
-        print(json.dumps({'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}'},indent=2));return 0
+        print(json.dumps({'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb},indent=2));return 0
     if args.command=='check':
-        _,geo=probe();return 0 if geo!='RU' else 2
+        _,geo=probe()
+        verdict=gemini_verdict(args.gemini_check)
+        return 2 if geo=='RU' or verdict=='REFUSED' else 0
     DATA.mkdir(parents=True,exist_ok=True)
     with (DATA/'lock').open('w') as f:
         try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:raise RuntimeError('Another search/monitor is running')
-        if args.command=='search':search(region,args.wait,args.delay)
-        else:monitor(region,args.interval,args.wait,args.delay)
+        if args.command=='search':search(region,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region)
+        else:monitor(region,args.interval,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region,args.fail_threshold)
     return 0
 
 if __name__=='__main__':
@@ -585,16 +749,19 @@ with open(sys.argv[1],'w') as f:json.dump({'region':sys.argv[2],'port':int(sys.a
 SETTINGS
 chmod 600 "$DATA/settings.json"
 
+EXTRA_FLAGS="--fail-threshold $FAIL_THRESHOLD --probe-mb $PROBE_MB"
+if (( GEMINI_CHECK )); then EXTRA_FLAGS="$EXTRA_FLAGS --gemini-check"; fi
+if (( STRICT_REGION )); then EXTRA_FLAGS="$EXTRA_FLAGS --strict-region"; fi
 cat > /etc/systemd/system/psiphon-autopin.service <<EOF
 [Unit]
-Description=Forcus Psiphon Auto-Pin v3.3.1 server rotation and Google geo monitor
+Description=Forcus Psiphon Auto-Pin v3.4.0 server rotation and Google geo monitor
 Wants=network-online.target
 After=network-online.target docker.service
 Requires=docker.service
 StartLimitIntervalSec=0
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 $APP/psiphon_autopin.py monitor --region ${REGION:-AUTO} --port $SOCKS_PORT --interval $INTERVAL --wait $WAIT --delay $DELAY
+ExecStart=/usr/bin/python3 $APP/psiphon_autopin.py monitor --region ${REGION:-AUTO} --port $SOCKS_PORT --interval $INTERVAL --wait $WAIT --delay $DELAY $EXTRA_FLAGS
 Restart=always
 RestartSec=30
 NoNewPrivileges=true
@@ -624,8 +791,9 @@ fi
 systemctl daemon-reload
 systemctl enable psiphon-autopin.service
 systemctl restart psiphon-autopin.service
-printf '\n[OK] Forcus Psiphon Auto-Pin v3.3.1 installed\n'
-echo '[OK] Distinct Psiphon servers selected via TargetServerEntry.'
+printf '\n[OK] Forcus Psiphon Auto-Pin v3.4.0 installed\n'
+echo '[OK] Existing healthy unpinned exits are retained; targeted pinning remains available.'
+echo "[OK] Gemini checks: $GEMINI_CHECK; optional throughput sample: ${PROBE_MB} MiB; strict region: $STRICT_REGION."
 echo "[OK] SOCKS5h: 127.0.0.1:$SOCKS_PORT (Google and IP checks through proxy)."
 echo "[OK] Monitoring every ${INTERVAL}s / unlimited search enabled."
 echo 'Logs: journalctl -u psiphon-autopin -f'
