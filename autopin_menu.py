@@ -17,7 +17,7 @@ import tempfile
 import time
 import unicodedata
 
-VERSION='4.1.2'
+VERSION='4.1.3'
 ROOT=Path('/')
 
 @dataclass(frozen=True)
@@ -307,10 +307,14 @@ class Menu:
         self.style=ConsoleStyle(terminal);self._status_cache=None
     def say(self,text=''):print(text,file=self.terminal,flush=True)
     def ask(self,prompt):
-        self.terminal.write(prompt);self.terminal.flush();answer=self.terminal.readline()
-        if not answer:raise EOFError
-        return answer.strip()
-    def confirm(self,text):return self.ask(text+' [да/нет, по умолчанию нет]: ').lower() in TRUE
+        while True:
+            self.terminal.write(prompt);self.terminal.flush();answer=self.terminal.readline()
+            if not answer:raise EOFError
+            if '\ufffd' in answer:
+                self.say('Некорректная кодировка ввода. Повторите ввод; для выбора используйте латиницу или цифры.')
+                continue
+            return answer.strip()
+    def confirm(self,text):return self.ask(text+' [y/n, по умолчанию n]: ').lower() in TRUE
     def panel(self,title,sections):
         self.say('\n'+self.style.box(title,sections))
     def footer(self):
@@ -358,12 +362,12 @@ class Menu:
             for index,field in enumerate(fields):
                 if index in headings:groups.append((headings[index],[]))
                 groups[-1][1].append(f'{index+1:2}. {field.label}: {display(field,self.config[field.key])}')
-            groups.append(('', ['a. Просмотреть и применить','0. Назад без применения']))
+            groups.append(('', ['y. Просмотреть и применить','0. Назад без применения']))
             self.panel(f'{mode.title()} Mode · экземпляр {self.instance}',groups)
             self.footer()
             answer=self.ask('Выбор: ').lower()
             if answer=='0':return False
-            if answer in ('a','а'):
+            if answer=='y':
                 if self.apply():return True
                 continue
             try:
@@ -480,7 +484,7 @@ def main(argv=None):
     if os.geteuid()!=0:print('Запустите меню от root: sudo auto-pin',file=sys.stderr);return 1
     try:
         instance=valid_instance(args.instance) if args.instance is not None else (discover() or [1])[0]
-        with open('/dev/tty','r',encoding='utf-8') as reader, open('/dev/tty','w',encoding='utf-8',buffering=1) as writer:
+        with open('/dev/tty','r',encoding='utf-8',errors='replace') as reader, open('/dev/tty','w',encoding='utf-8',buffering=1) as writer:
             return Menu(TerminalIO(reader,writer),instance,args.installer,args.emit_args).run()
     except (KeyboardInterrupt,EOFError):return 0
     except (ValueError,OSError,RuntimeError) as exc:print('Меню: '+str(exc),file=sys.stderr);return 1

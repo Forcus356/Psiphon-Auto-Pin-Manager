@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v4.1.2: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v4.1.3: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import datetime as dt
 import fcntl

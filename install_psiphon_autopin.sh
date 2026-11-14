@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Forcus Psiphon Auto-Pin Manager v4.1.2
+# Forcus Psiphon Auto-Pin Manager v4.1.3
 # Author: https://github.com/Forcus356
 # Ubuntu/Debian x86_64
 autopin_install_main() {
@@ -31,7 +31,7 @@ import tempfile
 import time
 import unicodedata
 
-VERSION='4.1.2'
+VERSION='4.1.3'
 ROOT=Path('/')
 
 @dataclass(frozen=True)
@@ -321,10 +321,14 @@ class Menu:
         self.style=ConsoleStyle(terminal);self._status_cache=None
     def say(self,text=''):print(text,file=self.terminal,flush=True)
     def ask(self,prompt):
-        self.terminal.write(prompt);self.terminal.flush();answer=self.terminal.readline()
-        if not answer:raise EOFError
-        return answer.strip()
-    def confirm(self,text):return self.ask(text+' [да/нет, по умолчанию нет]: ').lower() in TRUE
+        while True:
+            self.terminal.write(prompt);self.terminal.flush();answer=self.terminal.readline()
+            if not answer:raise EOFError
+            if '\ufffd' in answer:
+                self.say('Некорректная кодировка ввода. Повторите ввод; для выбора используйте латиницу или цифры.')
+                continue
+            return answer.strip()
+    def confirm(self,text):return self.ask(text+' [y/n, по умолчанию n]: ').lower() in TRUE
     def panel(self,title,sections):
         self.say('\n'+self.style.box(title,sections))
     def footer(self):
@@ -372,12 +376,12 @@ class Menu:
             for index,field in enumerate(fields):
                 if index in headings:groups.append((headings[index],[]))
                 groups[-1][1].append(f'{index+1:2}. {field.label}: {display(field,self.config[field.key])}')
-            groups.append(('', ['a. Просмотреть и применить','0. Назад без применения']))
+            groups.append(('', ['y. Просмотреть и применить','0. Назад без применения']))
             self.panel(f'{mode.title()} Mode · экземпляр {self.instance}',groups)
             self.footer()
             answer=self.ask('Выбор: ').lower()
             if answer=='0':return False
-            if answer in ('a','а'):
+            if answer=='y':
                 if self.apply():return True
                 continue
             try:
@@ -494,7 +498,7 @@ def main(argv=None):
     if os.geteuid()!=0:print('Запустите меню от root: sudo auto-pin',file=sys.stderr);return 1
     try:
         instance=valid_instance(args.instance) if args.instance is not None else (discover() or [1])[0]
-        with open('/dev/tty','r',encoding='utf-8') as reader, open('/dev/tty','w',encoding='utf-8',buffering=1) as writer:
+        with open('/dev/tty','r',encoding='utf-8',errors='replace') as reader, open('/dev/tty','w',encoding='utf-8',buffering=1) as writer:
             return Menu(TerminalIO(reader,writer),instance,args.installer,args.emit_args).run()
     except (KeyboardInterrupt,EOFError):return 0
     except (ValueError,OSError,RuntimeError) as exc:print('Меню: '+str(exc),file=sys.stderr);return 1
@@ -703,7 +707,7 @@ REGION=${REGION^^}
 [[ $REGION == AUTO ]] && REGION=''
 mkdir -p "$ROOT" "$CONF" "$APP" "$DATA"
 chmod 700 "$DATA"
-echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v4.1.2; backend=$BACKEND"
+echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v4.1.3; backend=$BACKEND"
 
 # Monitor is stopped after installation ownership checks below.
 
@@ -1299,7 +1303,7 @@ python3 -m py_compile "$APP/gemini_probe.py"
 
 cat > "$APP/psiphon_autopin.py" <<'PY_MANAGER'
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v4.1.2: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v4.1.3: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import datetime as dt
 import fcntl
@@ -2101,7 +2105,7 @@ write_menu_module > "$APP/autopin_menu.py"
 chmod 700 "$APP/autopin_menu.py"
 installer_tmp=$(mktemp "$APP/installer.XXXXXX")
 {
-    printf '#!/usr/bin/env bash\n# Forcus Auto-Pin offline installer v4.1.2\n'
+    printf '#!/usr/bin/env bash\n# Forcus Auto-Pin offline installer v4.1.3\n'
     declare -f autopin_install_main
     printf '\nautopin_install_main "$@"\n'
 } > "$installer_tmp"
@@ -2132,7 +2136,7 @@ TUNNEL_DEP=''
 if [[ $BACKEND == vps-psiphon ]]; then TUNNEL_DEP="$CONTAINER.service"; fi
 cat > "/etc/systemd/system/$MONITOR" <<EOF
 [Unit]
-Description=Forcus Psiphon Auto-Pin v4.1.2 server rotation and Google geo monitor
+Description=Forcus Psiphon Auto-Pin v4.1.3 server rotation and Google geo monitor
 Wants=network-online.target $TUNNEL_DEP
 After=network-online.target docker.service $TUNNEL_DEP
 Requires=docker.service
@@ -2173,7 +2177,7 @@ fi
 systemctl daemon-reload
 systemctl enable "$MONITOR"
 systemctl restart "$MONITOR"
-printf '\n[OK] Forcus Psiphon Auto-Pin v4.1.2 installed\n'
+printf '\n[OK] Forcus Psiphon Auto-Pin v4.1.3 installed\n'
 echo '[OK] Existing healthy unpinned exits are retained; targeted pinning remains available.'
 echo "[OK] Gemini checks: $GEMINI_CHECK; optional throughput sample: ${PROBE_MB} MiB; strict region: $STRICT_REGION."
 echo "[OK] SOCKS5h: $BIND:$SOCKS_PORT (Google and IP checks through proxy)."
