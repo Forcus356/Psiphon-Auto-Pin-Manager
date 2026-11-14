@@ -1,3 +1,7 @@
+> This translation describes an older release. For version 4.0 see [English](README.md) or [Русский](README.ru_RU.md).
+
+Auto-Pin 4.2: initial automatic PIN and owned-dependency uninstall; Easy / Advanced menu: `auto-pin`. See [English](README.md#interactive-setup) / [Русский](README.ru_RU.md#меню-easy--advanced).
+
 <div align="center">
 
 # 🛡️ Forcus Psiphon Auto-Pin Manager

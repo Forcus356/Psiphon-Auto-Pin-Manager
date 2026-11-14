@@ -17,7 +17,7 @@ import tempfile
 import time
 import unicodedata
 
-VERSION='4.1.3'
+VERSION='4.2.0'
 ROOT=Path('/')
 
 @dataclass(frozen=True)
@@ -421,11 +421,11 @@ class Menu:
         actions=[('Статус','status'),('Проверить соединение','check'),('Запустить','start'),
             ('Остановить','stop'),('Перезапустить','restart'),('Сменить сервер / ротация','rotate'),
             ('Поиск сервера / PIN','search'),('Показать журналы','logs'),('Измерить скорость','speed'),('Показать Xray JSON','xray'),
-            ('Подготовить PIN','prepare-pin'),('Обновить кэш серверов','refresh-cache'),('Удалить этот экземпляр','uninstall')]
+            ('Подготовить PIN','prepare-pin'),('Обновить кэш серверов','refresh-cache'),('Удалить этот экземпляр','uninstall'),('Удалить + принадлежащие скрипту Docker/Go','purge')]
         self.panel('Управление · экземпляр '+str(self.instance),[
             ('СОСТОЯНИЕ И СЛУЖБЫ',[f'{index+1:2}. {label}' for index,(label,_) in enumerate(actions) if index<5]),
             ('ДИАГНОСТИКА И СЕРВЕРЫ',[f'{index+1:2}. {label}' for index,(label,_) in enumerate(actions) if 5<=index<12]),
-            ('', ['13. Удалить этот экземпляр','0. Назад'])])
+            ('УДАЛЕНИЕ',[f'{index+1:2}. {label}' for index,(label,_) in enumerate(actions) if index>=12]+['0. Назад'])])
         self.footer();answer=self.ask('Выбор: ')
         if answer=='0':return False
         try:
@@ -439,6 +439,10 @@ class Menu:
             except (ValueError,AssertionError):self.say('Нужно число 1–10000.');return False
             extra=[str(count)]
         if command=='refresh-cache':extra=['--allow-interruption']
+        purge=(command=='purge')
+        if purge:
+            command='uninstall';extra=['--purge-deps']
+            self.say('Docker/Go удаляются только при наличии журнала установки скриптом и отсутствии других потребителей. Существовавшие ранее зависимости сохраняются.')
         if command in ('stop','restart','rotate','search','refresh-cache','uninstall'):
             warning='Удалятся службы, контейнер и данные только выбранного экземпляра.' if command=='uninstall' else 'Это действие может прервать соединения выбранного экземпляра.'
             self.say(warning)

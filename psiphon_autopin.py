@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v4.1.3: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v4.2.0: controlled server selection + SOCKS-only geolocation."""
 import argparse
+import contextlib
 import datetime as dt
 import fcntl
 import ipaddress
@@ -251,7 +252,7 @@ def evaluate_exit(region, gemini, mb, strict=False):
             f'Google={geo} != requested {region}' if strict and region and geo!=region else '')
     return ip,geo,verdict,speed,reason
 
-def adopt_current(region,gemini,mb,strict,observed=None):
+def adopt_current(region,gemini,mb,strict,observed=None,auto_pin=True):
     """Keep a healthy tunnel; recover an existing target only against the cached DB entry."""
     config=read_json(CONFIG,{}) or {}
     ip,geo,verdict,speed,reason = observed if observed is not None else evaluate_exit(region,gemini,mb,strict)
@@ -283,7 +284,7 @@ def adopt_current(region,gemini,mb,strict,observed=None):
         'speed_kib_s':speed,'adopted_unpinned':True,
         'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
     log(f'ADOPTED HEALTHY exit={ip} Google={geo} Gemini={verdict} ID={diag}; no restart (not targeted pin)')
-    prepare_current_pin(region,ip,geo,diag)
+    if auto_pin:auto_pin_current(region,gemini,mb,strict)
     return True
 
 def started_at():
@@ -375,20 +376,80 @@ def docker_restart(wait):
     tunnel_action('restart')
     return wait_ready(wait)
 
+def export_candidates_stopped(region):
+    raw=run([str(BASE/'psiphon-server-export'),str(db_path()),region],timeout=120)
+    rows=[json.loads(line) for line in raw.splitlines() if line.strip()]
+    rows=[v for v in rows if v.get('server_ip') and v.get('diagnostic') and v.get('encoded')]
+    if not rows:raise RuntimeError(f'No known servers in region {region or "AUTO"}')
+    cache_candidates(rows,region)
+    log(f'Loaded {len(rows)} distinct servers')
+    return rows
+
 def collect_candidates(region):
-    # BoltDB is read only with the container stopped; always start it again.
     log('Exporting distinct server entries from read-only BoltDB...')
     tunnel_action('stop')
+    try:return export_candidates_stopped(region)
+    finally:tunnel_action('start')
+
+def auto_pin_current(region,gemini=False,mb=0,strict=False,wait=None):
+    """Populate the stopped DB cache, connect to the observed server, then verify."""
+    cfg=read_json(CONFIG,{}) or {};state=read_json(STATE,{}) or {}
+    if int(POLICY.get('tunnel_pool',1))!=1 or cfg.get('TargetServerEntry') or not state.get('adopted_unpinned') or speed_reason(state.get('speed_kib_s')):
+        return False
+    retry_path=DATA/'initial-pin-attempt.json'
+    retry=read_json(retry_path,{}) or {};now=time.time()
+    if retry.get('region')==region and float(retry.get('retry_after',0))>now:return False
+    # Failure never causes a tight reconnect loop; retry on a later normal health cycle.
+    atomic_json(retry_path,{'region':region,'retry_after':now+max(60,int(POLICY.get('interval',300)))})
+    expected=state.get('diagnostic_id');initial_ip=state.get('ip');changed=False
+    wait=int(wait if wait is not None else POLICY.get('wait',75))
     try:
-        raw=run([str(BASE/'psiphon-server-export'),str(db_path()),region],timeout=120)
-        rows=[json.loads(line) for line in raw.splitlines() if line.strip()]
-        rows=[v for v in rows if v.get('server_ip') and v.get('diagnostic') and v.get('encoded')]
-        if not rows:raise RuntimeError(f'No known servers in region {region or "AUTO"}')
-        cache_candidates(rows,region)
-        log(f'Loaded {len(rows)} distinct servers')
-        return rows
-    finally:
-        tunnel_action('start')
+        if not expected or connected_id()!=expected or socks_ip()!=initial_ip:
+            raise RuntimeError('Current exit changed before initial pin')
+        old_start=started_at()
+        log(f'INITIAL PIN: building cache for ID={expected}; one controlled reconnect')
+        tunnel_action('stop')
+        try:
+            export_candidates_stopped(region)
+            candidate=candidate_for_connected_server(expected,region)
+            if candidate is None:raise RuntimeError('Current server has no unique datastore entry')
+            changed=True
+            pending=dict(state);pending.update(pin_prepared=True,prepared_container_started_at=old_start)
+            atomic_json(STATE,pending)
+            apply_candidate(candidate,region)
+        finally:
+            tunnel_action('start')
+        wait_ready(wait)
+        if started_at()==old_start:raise RuntimeError('No new container start observed')
+        ip,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
+        if reason or speed_reason(speed):raise RuntimeError('Pinned exit did not pass current policy')
+        if connected_id()!=expected:raise RuntimeError('Pinned server ID mismatch')
+        time.sleep(2)
+        if socks_ip()!=ip or connected_id()!=expected:raise RuntimeError('Pinned exit changed during verification')
+        if (read_json(CONFIG,{}) or {}).get('TargetServerEntry')!=candidate['encoded']:
+            raise RuntimeError('Configured target changed during verification')
+        atomic_json(STATE,{'region':region,'ip':ip,'google_region':geo,'gemini':verdict,
+            'speed_kib_s':speed,'diagnostic_id':expected,'server_ip':candidate['server_ip'],
+            'adopted_unpinned':False,'pin_prepared':False,
+            'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+    except Exception as exc:
+        if changed:
+            atomic_json(CONFIG,cfg);atomic_json(STATE,state)
+            try:docker_restart(wait)
+            except Exception as restore_error:
+                raise RuntimeError('Initial PIN rollback could not restore proxy') from restore_error
+        else:
+            try:wait_ready(wait)
+            except Exception as recovery_error:
+                raise RuntimeError('Initial PIN attempt left proxy unavailable') from recovery_error
+        log(f'INITIAL PIN DEFERRED: {exc}; no verified PIN claimed; retry on a later health cycle')
+        return False
+    retry_path.unlink(missing_ok=True)
+    try:remember_pin(candidate,region)
+    except Exception as exc:log(f'PIN verified; reserve update deferred: {type(exc).__name__}')
+    log(f'INITIAL PIN VERIFIED: exit={ip} Google={geo} Gemini={verdict} ID={expected}; initial exit={initial_ip}')
+    return True
+
 
 def apply_candidate(candidate,region):
     change_config({'EgressRegion':region,'TargetServerEntry':candidate['encoded'],'TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True})
@@ -488,7 +549,7 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
         seen_exits.clear()
 
 def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
-    log(f'Monitor v4.1: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
+    log(f'Monitor v4.2: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
     failures=0;slow_count=0;slow_identity=None
     try:wait_ready(wait)
     except Exception as exc:log(f'Startup readiness pending: {exc}')
@@ -547,7 +608,8 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
                                  verified_at=dt.datetime.now(dt.timezone.utc).isoformat())
                     atomic_json(STATE,state)
                 if state.get('adopted_unpinned') and not config.get('TargetServerEntry'):
-                    prepare_current_pin(region,ip,geo,diag)
+                    if auto_pin_current(region,gemini,mb,strict,wait):
+                        failures=0;time.sleep(interval);continue
                 log(f'Healthy exit unchanged: {ip} Google={geo} Gemini={verdict}; '
                     + ('adopted (not pinned)' if state.get('adopted_unpinned') else 'pinned'))
         except Exception as exc:
@@ -614,37 +676,50 @@ def pool_monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,thres
                 failures=0
         time.sleep(next_check)
 
-def uninstall():
+def uninstall(purge_deps=False):
     """Remove just this instance; retain migration backups and any image used by others."""
     if os.geteuid()!=0:raise RuntimeError('Run as root')
-    image=''
-    try:
-        mount=run(['docker','inspect','-f','{{range .Mounts}}{{if eq .Destination "/config"}}{{.Source}}{{end}}{{end}}',CONTAINER]).strip()
-        if mount!=str(CONFIG.parent):raise RuntimeError('Foreign container mount; refusing uninstall')
-        image=run(['docker','inspect','-f','{{.Config.Image}}',CONTAINER]).strip()
-    except RuntimeError as exc:
-        if 'Foreign' in str(exc):raise
-    for unit in (monitor_unit(),CONTAINER+'.service',CONTAINER+'-watchdog.timer',CONTAINER+'-watchdog.service'):
-        subprocess.run(['systemctl','disable','--now',unit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        (Path('/etc/systemd/system')/unit).unlink(missing_ok=True)
-    subprocess.run(['docker','rm','-f',CONTAINER],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    for name in (CONTAINER,'psiphon-autopin'+('' if INSTANCE==1 else f'-{INSTANCE}'),CONTAINER+'-run',CONTAINER+'-prestart',CONTAINER+'-watchdog',CONTAINER+'-gemini-check',CONTAINER+'-advance-region'):
-        (Path('/usr/local/sbin')/name).unlink(missing_ok=True)
-    ENV_FILE.unlink(missing_ok=True)
-    for path in (BASE,DATA,CONFIG.parent.parent):
-        if path.exists():shutil.rmtree(path)
-    run(['systemctl','daemon-reload'])
-    if not any(Path('/opt').glob('psiphon-autopin*/autopin_menu.py')):
-        launcher=Path('/usr/local/sbin/auto-pin')
-        if launcher.is_file() and '# Managed by Forcus Auto-Pin menu' in launcher.read_text():launcher.unlink()
-    if image:subprocess.run(['docker','image','rm',image],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    print(f'Removed instance {INSTANCE}; backups under /var/backups/psiphon-autopin are retained')
+    cleanup=None;dependency_module=None
+    if (BASE/'autopin_system.py').is_file():
+        import autopin_system
+        cleanup=autopin_system.cleanup_dependencies;dependency_module=autopin_system
+    elif purge_deps:
+        raise RuntimeError('Dependency receipt helper missing; update Auto-Pin first')
+    with (dependency_module.locked() if dependency_module else contextlib.nullcontext()):
+        image=''
+        try:
+            mount=run(['docker','inspect','-f','{{range .Mounts}}{{if eq .Destination "/config"}}{{.Source}}{{end}}{{end}}',CONTAINER]).strip()
+            if mount!=str(CONFIG.parent):raise RuntimeError('Foreign container mount; refusing uninstall')
+            image=run(['docker','inspect','-f','{{.Config.Image}}',CONTAINER]).strip()
+        except RuntimeError as exc:
+            if 'Foreign' in str(exc):raise
+        for unit in (monitor_unit(),CONTAINER+'.service',CONTAINER+'-watchdog.timer',CONTAINER+'-watchdog.service'):
+            subprocess.run(['systemctl','disable','--now',unit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            (Path('/etc/systemd/system')/unit).unlink(missing_ok=True)
+        subprocess.run(['docker','rm','-f',CONTAINER],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        for name in (CONTAINER,'psiphon-autopin'+('' if INSTANCE==1 else f'-{INSTANCE}'),CONTAINER+'-run',CONTAINER+'-prestart',CONTAINER+'-watchdog',CONTAINER+'-gemini-check',CONTAINER+'-advance-region'):
+            (Path('/usr/local/sbin')/name).unlink(missing_ok=True)
+        ENV_FILE.unlink(missing_ok=True)
+        for path in (BASE,DATA,CONFIG.parent.parent):
+            if path.exists():shutil.rmtree(path)
+        run(['systemctl','daemon-reload'])
+        if not any(Path('/opt').glob('psiphon-autopin*/autopin_menu.py')):
+            launcher=Path('/usr/local/sbin/auto-pin')
+            if launcher.is_file() and '# Managed by Forcus Auto-Pin menu' in launcher.read_text():launcher.unlink()
+        if image:subprocess.run(['docker','image','rm',image],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        if cleanup:
+            result=cleanup(purge=purge_deps,lock_held=True)
+            print(json.dumps({'dependency_cleanup':result},indent=2))
+            if any(isinstance(value,dict) and (value.get('exit_code',0)!=0 or value.get('remaining')) for value in result.values()):
+                raise RuntimeError('Auto-Pin removed, but some owned dependencies could not be removed; receipt retained')
+        print(f'Removed instance {INSTANCE}; backups under /var/backups/psiphon-autopin are retained')
 
 def main():
-    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v4.1')
+    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v4.2')
     ap.add_argument('command',choices=['menu','check','search','monitor','status','refresh-cache','prepare-pin','set-region','set-pool','region','pool','rotate','start','stop','restart','logs','speed','uninstall','xray'])
     ap.add_argument('value',nargs='?')
     ap.add_argument('--instance',type=int,default=1)
+    ap.add_argument('--purge-deps',action='store_true',help='With uninstall: remove only Docker/Go installed by Auto-Pin and no longer used')
     ap.add_argument('--region-pool',default=None)
     ap.add_argument('--deny-regions',default=None)
     ap.add_argument('--min-speed',type=float,default=None)
@@ -664,6 +739,7 @@ def main():
     ap.add_argument('--no-strict-region',dest='strict_region',action='store_false')
     ap.add_argument('--fail-threshold',type=int,default=None)
     args=ap.parse_args()
+    if args.purge_deps and args.command!='uninstall':ap.error('--purge-deps requires uninstall')
     force_rotate=(args.command=='rotate')
     if not 1<=args.instance<=99:ap.error('instance must be 1..99')
     if args.instance!=1:configure_instance(args.instance)
@@ -680,6 +756,7 @@ def main():
         if getattr(args,key) is None:setattr(args,key,int(settings.get(key,default)))
     global POLICY
     POLICY=dict(settings)
+    POLICY.update(interval=args.interval,wait=args.wait)
     for key,value in [('region_pool',args.region_pool),('deny_regions',args.deny_regions)]:
         if value is not None:
             try:POLICY[key]=countries(value)
@@ -711,7 +788,7 @@ def main():
         print(json.dumps({'instance':INSTANCE,'region_pool':POLICY.get('region_pool',[]),'min_speed_kib':POLICY.get('min_speed_kib',0),'slow_threshold':POLICY.get('slow_threshold',2),'deny_regions':POLICY.get('deny_regions',['RU']),'impersonate':POLICY.get('impersonate',False),'backend':backend(),'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
     if args.command=='xray':
         print(json.dumps({'tag':'psiphon-out'+('' if INSTANCE==1 else f'-{INSTANCE}'),'protocol':'socks','settings':{'servers':[{'address':bind,'port':port}]}},indent=2));return 0
-    if args.command=='uninstall':uninstall();return 0
+    if args.command=='uninstall':uninstall(args.purge_deps);return 0
     if args.command=='logs':
         return subprocess.call(['journalctl','-u',monitor_unit(),'-u',CONTAINER+'.service','-n',args.value or '50','--no-pager'])
     if args.command=='speed':speed_probe(args.probe_mb or 4);return 0
@@ -763,7 +840,7 @@ def main():
                 diag=connected_id()
                 if not state or state.get('ip')!=ip or state.get('diagnostic_id')!=diag:
                     adopt_current(region,args.gemini_check,args.probe_mb,args.strict_region,
-                                  observed=(ip,geo,verdict,speed,reason))
+                                  observed=(ip,geo,verdict,speed,reason),auto_pin=False)
                 if not prepare_current_pin(region,ip,geo,diag):
                     log('No unique cached matching server (or pin already prepared); tunnel untouched')
             elif args.command=='search':
