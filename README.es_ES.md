@@ -1,137 +1,381 @@
-> This translation describes an older release. For version 4.0 see [English](README.md) or [Русский](README.ru_RU.md).
-
-Auto-Pin 4.2: initial automatic PIN and owned-dependency uninstall; Easy / Advanced menu: `auto-pin`. See [English](README.md#interactive-setup) / [Русский](README.ru_RU.md#меню-easy--advanced).
-
 <div align="center">
 
-# 🛡️ Forcus Psiphon Auto-Pin Manager
+<img src="docs/assets/banner.svg" alt="Forcus Auto-Pin — Psiphon Manager" width="100%">
 
-**Rotación automática de servidores Psiphon y fijación de IP según Google**
+# Forcus Auto-Pin
 
-![Version](https://img.shields.io/badge/version-3.3-blue) ![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-informational) [![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-green)](LICENSE)
+**SOCKS5 local · PIN automático · Google/Gemini · recuperación**
 
-[English](README.md) | [Русский](README.ru_RU.md) | [فارسی](README.fa_IR.md) | [العربية](README.ar_EG.md) | [中文](README.zh_CN.md) | [Español](README.es_ES.md) | [Türkçe](README.tr_TR.md)
+![Version](https://img.shields.io/badge/version-4.2.0-32b98b?style=flat-square)
+![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
+
+[English](README.md) · [فارسی](README.fa_IR.md) · [العربية](README.ar_EG.md) · [中文](README.zh_CN.md) · **Español** · [Русский](README.ru_RU.md) · [Türkçe](README.tr_TR.md)
 
 </div>
 
-Gestor para Linux que selecciona servidores Psiphon individualmente, comprueba la IP de salida y el país detectado por Google **solo a través del SOCKS5h local**, y fija una salida válida. Si Google la clasifica como RU, vuelve a buscar.
+Gestor de Psiphon para VPS Linux. Instala, elige Easy o Advanced y administra instancias independientes desde la consola. Xray utiliza el mismo SOCKS5 mediante un outbound JSON.
 
-## ✨ Características
+[Inicio rápido](#quick-start) · [Funciones](#features) · [Menú de consola](#menu) · [Referencia de comandos](#commands) · [Integración con Xray](#xray) · [Actualización y mantenimiento](#operations) · [Desinstalación](#uninstall) · [Preguntas frecuentes](#faq)
 
-- Selección de servidores mediante `TargetServerEntry`
-- Lectura de BoltDB en modo de solo lectura
-- Comprobación de IP y país de Google con SOCKS5h, sin conexión directa alternativa
-- Fijación verificada, monitorización periódica y cambio automático
-- País, puerto e intervalos configurables
-- Compatible con Docker CE o `docker.io` existentes
+<a id="quick-start"></a>
 
-## 📋 Requisitos
+## Inicio rápido
 
-Ubuntu o Debian **x86_64**, root, systemd y acceso a Internet. Comprueba que el proveedor permita VPN o proxies.
+Ejecuta los comandos como root en Bash. Compatible con Ubuntu/Debian x86_64 y systemd; requiere Internet y curl. El instalador añade Docker/Go si faltan y conserva las instalaciones existentes.
 
-## 🚀 Inicio rápido
-
-Selección interactiva de país y puerto:
+Descarga y ejecuta el instalador. Sin argumentos, en una terminal, abre el menú:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh -o /tmp/install_psiphon_autopin.sh && bash /tmp/install_psiphon_autopin.sh
 ```
 
-### Ejemplos no interactivos
+Después de instalar, vuelve al menú en cualquier momento:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh | sudo bash -s -- --region PL --port 40000
+auto-pin
+```
+
+**SOCKS5:** `127.0.0.1:40000` → `1080`  ·  **HTTP:** `127.0.0.1:40001` → `8080`
+
+Hay documentación en siete idiomas. El menú de consola está actualmente en ruso; los comandos y las opciones son iguales en todas las guías.
+
+<a id="features"></a>
+
+## Funciones
+
+- Primer PIN automático: crea la caché, conecta al servidor elegido y verifica antes de declarar el PIN.
+- Un túnel con PIN o un grupo de 2–32 túneles con comprobaciones por muestreo.
+- Hasta 99 instancias independientes con puertos, archivos, bases, bloqueos y servicios separados.
+- Grupos de países, países de Google bloqueados y coincidencia estricta opcional.
+- Prueba opcional de Gemini y perfil TLS de navegador para detectar CAPTCHA.
+- Umbral de velocidad con confirmación por muestras consecutivas y recuperación automática.
+- SOCKS5 local, HTTP opcional, IPv4 privada y JSON outbound de Xray.
+- Desinstalación que respeta Docker/Go preexistentes y otros consumidores.
+
+<a id="menu"></a>
+
+## Menú de consola
+
+**Easy:** país, formato de conexión, Gemini, puerto SOCKS e intervalo del watchdog en minutos. **Advanced:** todas las opciones. Los puntos 3 y 4 del menú principal permiten administrar y seleccionar la instancia.
+
+Enter conserva el valor; `-` vacía una lista de países. La `y` latina muestra y aplica la configuración tras confirmar con `y/n`. Cancelar conserva los archivos. Aplicar puede reconectar el túnel elegido; Easy mantiene los valores ocultos de Advanced.
+
+El pie muestra resultados guardados; abrir el menú no hace una nueva prueba de red. Usa `check`. `NO_COLOR=1 auto-pin` desactiva el color; `TERM=dumb auto-pin` usa bordes ASCII.
+
+<details>
+<summary>Vista previa del menú</summary>
+
+Ejemplo del renderizador actual; las direcciones y los estados mostrados son datos de demostración.
+
+![Vista previa del menú](docs/assets/menu-preview.png)
+
+[Vista previa del menú (.txt)](docs/assets/menu-demo.txt)
+
+</details>
+
+<a id="examples"></a>
+
+## Ejemplos de instalación
+
+Cada ejemplo descarga y ejecuta el instalador sin menú. Las opciones explícitas sustituyen valores guardados; las demás se conservan al actualizar.
+
+<details>
+<summary>Ejemplos de instalación</summary>
+
+### Sin comprobar Gemini
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --no-gemini-check
+```
+
+### Grupo de países y velocidad mínima
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL,DE,PL --min-speed 1000
+```
+
+### Segunda instancia independiente
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --instance 2 --region DE --port 40002
+```
+
+### Publicar solo SOCKS5
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --no-http
+```
+
+### Guardar una conexión Xray
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --connection xray
+```
+
+### Tres túneles y watchdog de 10 minutos
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --tunnel-pool 3 --interval 600
+```
+
+### Gemini con perfil TLS de navegador
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --gemini-check --impersonate
+```
+
+</details>
+
+<a id="commands"></a>
+
+## Referencia de comandos
+
+| Comando | Función |
+| --- | --- |
+| `auto-pin` | Abrir el menú de configuración y gestión. |
+| `auto-pin --instance 2` | Abrir el menú de la instancia 2. |
+| `psiphon-autopin status` | Mostrar configuración y último resultado. |
+| `psiphon-autopin check` | Ejecutar una comprobación nueva. |
+| `psiphon-autopin rotate` | Solicitar rotación del servidor. |
+| `psiphon-autopin region NL` | Cambiar a NL y vaciar el grupo anterior. |
+| `psiphon-autopin pool NL,DE,PL` | Definir un grupo de países alternativos. |
+| `psiphon-autopin pool ''` | Vaciar el grupo de países. |
+| `psiphon-autopin speed` | Medir la velocidad mediante Psiphon. |
+| `psiphon-autopin logs 100` | Mostrar registros recientes del monitor y túnel. |
+| `psiphon-autopin start` | Iniciar la instancia elegida. |
+| `psiphon-autopin stop` | Detener la instancia elegida. |
+| `psiphon-autopin restart` | Reiniciar la instancia elegida. |
+| `psiphon-autopin xray` | Imprimir el outbound SOCKS para Xray. |
+| `psiphon-autopin-2 status` | Mostrar el estado de la instancia 2. |
+| `psiphon-autopin menu` | Abrir el menú desde la CLI original. |
+| `vps-psiphon status` | Alias compatible del mismo gestor. |
+| `psiphon-autopin refresh-cache --allow-interruption` | Renovar la caché; interrumpe el túnel. |
+| `psiphon-autopin prepare-pin` | Preparar un PIN para un reinicio futuro. |
+| `psiphon-autopin search` | Buscar un servidor adecuado. |
+| `psiphon-autopin monitor` | Entrada interna del monitor; normalmente la ejecuta systemd. |
+
+`set-region --region NL` y `set-pool --region-pool NL,DE` son las formas largas de `region NL` y `pool NL,DE`. Las opciones de ejecución pueden cambiar la política de un comando; usa el menú o instalador para guardar toda la configuración del servicio.
+
+```bash
+psiphon-autopin set-region --region NL
+psiphon-autopin set-pool --region-pool NL,DE
+```
+
+Códigos de salida de `check`: **0** resultado aceptado, **2** rechazo por política, incluida velocidad baja, **1** error de prueba/ejecución. Un resultado aceptado puede incluir Gemini `INCONCLUSIVE`.
+
+<a id="xray"></a>
+
+## Integración con Xray
+
+La ruta es **Xray → SOCKS5 → Psiphon → Internet**. xray imprime el outbound; --connection xray también guarda xray-outbound.json. Añade el outbound y las reglas de enrutamiento a Xray. Se utiliza el mismo SOCKS5, sin crear otro transporte.
+
+```bash
+psiphon-autopin xray
+```
+
+```json
+{
+  "tag": "psiphon-out",
+  "protocol": "socks",
+  "settings": {
+    "servers": [{"address": "127.0.0.1", "port": 40000}]
+  }
+}
+```
+
+En una red Docker bridge, 127.0.0.1 apunta al contenedor Xray. Usa la red del host o una IPv4 privada existente del VPS mediante --bind. No se admite una dirección pública. El proxy está destinado a TCP.
+
+<a id="options"></a>
+
+## Opciones del instalador
+
+El menú usa minutos para el watchdog; --interval y el campo JSON interval siempre usan segundos. Sustituye los valores de ejemplo según tu configuración.
+
+Una instalación nueva con `auto` usa `vps-psiphon`; se conservan los backends reconocidos existentes. `console` requiere loopback. `--no-gemini-check` mantiene comprobaciones de país, velocidad y recuperación.
+
+<details>
+<summary>Opciones del instalador</summary>
+
+| Opción | Valor inicial | Función |
+| --- | --- | --- |
+| `--region NL / --region AUTO / --region NL,DE` | menú / obligatorio sin interacción (NL) | País Psiphon de dos letras, AUTO o lista separada por comas. |
+| `--instance N` | 1 | Elegir instancia 1–99. |
+| `--port N` | 40000 + 2 × (N−1) | Puerto SOCKS 1024–65534; HTTP usa el siguiente. |
+| `--connection socks5\|xray` | socks5 | Guardar salida como dirección SOCKS5 o JSON Xray. |
+| `--menu / --interactive` | TTY / 0 args | Abrir el asistente; admite --instance N. |
+| `--menu-mode easy\|advanced` | easy | Recordar el modo Easy o Advanced. |
+| `--region-pool NL,DE` | vacío | Lista de países alternativos. |
+| `--bind ADDR` | 127.0.0.1 | Usar loopback o una IPv4 privada existente. |
+| `--bind-loopback` | 127.0.0.1 | Restablecer 127.0.0.1. |
+| `--http / --no-http` | activado | Activar/desactivar publicación HTTP. |
+| `--gemini-check / --no-gemini-check` | activado | Activar/desactivar prueba de Gemini. |
+| `--impersonate / --no-impersonate` | desactivado | Activar/desactivar TLS de navegador para la página Gemini. |
+| `--strict-region / --no-strict-region` | desactivado | Exigir/desactivar coincidencia estricta del país Google. |
+| `--interval N` | 300 s | Intervalo normal en segundos; mínimo 60. |
+| `--wait N` | 75 s | Espera de conexión en segundos; mínimo 20. |
+| `--delay N` | 12 s | Pausa entre intentos en segundos; mínimo 2. |
+| `--min-speed N` | 800 KiB/s | Mínimo KiB/s; 0 desactiva la rotación por velocidad. |
+| `--probe-mb N` | 4 MiB | Muestra de 0–10 MiB; con 0 y umbral activo se mide una página. |
+| `--slow-threshold N` | 2 | Muestras lentas consecutivas antes de rotar, 2–20. |
+| `--fail-threshold N` | 3 | Fallos consecutivos antes de recuperar, 2–20. |
+| `--deny-regions 'RU BY IR SY CU KP CN VE'` | RU BY IR SY CU KP CN VE | Países Google bloqueados; una cadena vacía limpia la lista. |
+| `--tunnel-pool N` | 1 | 1 usa PIN; 2–32 utiliza un grupo sin un único PIN fijo. |
+| `--backend auto\|console\|vps-psiphon` | auto | Detectar/conservar el backend o elegirlo explícitamente. |
+| `--help` | — | Mostrar ayuda del instalador. |
+
+</details>
+
+<a id="operations"></a>
+
+## Actualización y mantenimiento
+
+### Actualizar una instancia
+
+Vuelve a descargar el instalador actual y aplícalo a la instancia. Conserva la configuración salvo las opciones indicadas. Abrir auto-pin no descarga una versión nueva.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh -o /tmp/install_psiphon_autopin.sh && bash /tmp/install_psiphon_autopin.sh --instance 1
+```
+
+### Diagnóstico
+
+Consulta el estado, sigue solo el registro del monitor y comprueba ambos proxies configurados:
+
+```bash
+psiphon-autopin status
+journalctl -u psiphon-autopin.service -n 100 --no-pager
+journalctl -u psiphon-autopin.service -f
+systemctl status vps-psiphon.service psiphon-autopin.service --no-pager
 ```
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh | sudo bash -s -- --region DE --port 41000 --interval 1800 --wait 90 --delay 15
+curl -4 -fsS --noproxy '' --proxy socks5h://127.0.0.1:40000 https://api.ipify.org
 ```
-
-## ⚙️ Opciones de instalación
-
-| Opción | Predeterminado | Descripción |
-|---|---|---|
-| `--region DE` | Prompt; `[DE]` | País del servidor Psiphon (código de dos letras) o `AUTO`. |
-| `--port 40000` | Prompt; `40000` | Puerto SOCKS5 local, de 1024 a 65534; HTTP usa el siguiente. |
-| `--interval 3600` | `3600` | Intervalo de monitorización en segundos; mínimo 60. |
-| `--wait 75` | `75` | Espera de conexión en segundos; mínimo 20. |
-| `--delay 12` | `12` | Pausa entre intentos en segundos; mínimo 2. |
-| `--help` | — | Mostrar ayuda. |
-
-## 🧰 Comandos del gestor
-
-| Command | Description |
-|---|---|
-| `status` | Mostrar estado y salida fijada |
-| `check` | Comprobar IP y Google mediante SOCKS5h; códigos 0=no RU, 2=RU |
-| `search` | Buscar servidor; detener antes el monitor |
-| `monitor` | Monitorización continua por systemd |
 
 ```bash
-python3 /opt/psiphon-autopin/psiphon_autopin.py status
-python3 /opt/psiphon-autopin/psiphon_autopin.py check
+curl -4 -fsS --noproxy '' --proxy http://127.0.0.1:40001 https://api.ipify.org
 ```
 
-`--region`, `--port`, `--interval`, `--wait`, `--delay` — Descripción.
+Las pruebas de conexión, IP, país, Gemini y velocidad usan SOCKS con DNS remoto sin conexión directa alternativa. Las descargas del instalador pueden usar la red del VPS. WARP no se elimina automáticamente.
 
-## 🛠️ Servicio y diagnóstico
+### Instancias independientes
+
+Usa psiphon-autopin-N o auto-pin --instance N. Estos son los puertos iniciales; --port permite cambiarlos. Los límites 99/32 son límites de configuración, no una garantía de capacidad del VPS.
+
+| # | SOCKS5 | HTTP | CLI |
+| --- | --- | --- | --- |
+| 1 | `40000` | `40001` | `psiphon-autopin` |
+| 2 | `40002` | `40003` | `psiphon-autopin-2` |
+| 3 | `40004` | `40005` | `psiphon-autopin-3` |
+
+### Watchdog y tráfico
+
+El punto 5 de Easy y Advanced permiten elegir minutos: mínimo 1, inicialmente 5. Se aceptan fracciones como 1.5 si equivalen a segundos enteros. Los reintentos por fallos pueden ser más frecuentes. No hay un segundo watchdog de Chara.
+
+Valores iniciales: Gemini activo, un túnel, 800 KiB/s, dos muestras lentas, prueba de 4 MiB y tres fallos antes de recuperar. Una prueba de 4 MiB cada cinco minutos consume unos 34 GiB en 30 días, sin búsquedas. --min-speed 0 desactiva rotación por velocidad; --probe-mb 0 por sí solo puede seguir midiendo una página.
+
+<a id="uninstall"></a>
+
+## Desinstalación
+
+Eliminar la instancia conservando Docker/Go:
 
 ```bash
-journalctl -u psiphon-autopin -f
-journalctl -u psiphon-autopin -n 80 --no-pager
-systemctl status psiphon-autopin --no-pager
-systemctl restart psiphon-autopin
-systemctl stop psiphon-autopin
-systemctl enable --now psiphon-autopin
-docker logs --tail 80 vps-psiphon
-docker ps -a --filter name=vps-psiphon
+psiphon-autopin uninstall
 ```
 
-## 📌 Ejemplos
+Eliminar la instancia y los paquetes Docker/Go elegibles que instaló este gestor:
 
 ```bash
-# Exit IP through Psiphon
-curl -4 -fsS --noproxy '' \
-  --proxy socks5h://127.0.0.1:40000 https://api.ipify.org
-
-# Manual search; monitor must not be running
-systemctl stop psiphon-autopin
-python3 /opt/psiphon-autopin/psiphon_autopin.py search --region PL --port 40000
-systemctl start psiphon-autopin
+psiphon-autopin uninstall --purge-deps
 ```
 
-## 🔄 Funcionamiento
-
-El gestor lee las entradas de Psiphon desde BoltDB en modo de solo lectura, selecciona un servidor con `TargetServerEntry` y comprueba la IP y región de Google mediante SOCKS5h. Confirma el resultado dos veces antes de guardarlo.
-
-## ⚠️ Notas importantes
-
-`--region PL` no garantiza `Google=PL`: el criterio actual es `Google != RU`. La IP del servidor puede diferir de la IP de salida. Cambiar de servidor interrumpe las conexiones activas.
-
-Los puertos SOCKS5 y HTTP escuchan solo en `127.0.0.1`; HTTP usa el puerto SOCKS + 1. Las descargas de instalación usan la conexión del VPS. Revisa el código antes de ejecutarlo como root.
-
-## 🩺 Solución de problemas
-
-| Error | Solution |
-|---|---|
-| `containerd.io : Conflicts: containerd` | Conflicto de paquetes Docker CE/docker.io; no elimines Docker sin comprobarlo. |
-| `Config exists but container missing` | Guarda la configuración antigua e identifica su servicio. |
-| `SOCKS/HTTP port ... occupied` | Comprueba con `ss -lntp` y cambia `--port`. |
-| `No known servers in region` | Revisa los logs de Docker: la base de servidores puede estar vacía. |
-| `Another search/monitor is running` | Detén la monitorización antes de `search`. |
-
-## 📂 Rutas de instalación
-
-```text
-/opt/vps-psiphon/config/psiphon.config
-/opt/psiphon-autopin/psiphon_autopin.py
-/opt/psiphon-autopin/psiphon-server-export
-/opt/psiphon-autopin/ipregion.sh
-/var/lib/psiphon-autopin/settings.json
-/var/lib/psiphon-autopin/state.json
-/etc/systemd/system/psiphon-autopin.service
+```bash
+psiphon-autopin-2 uninstall --purge-deps
 ```
 
-## 📄 Licencia y créditos
+Desde 4.2 se registra el origen de cada componente. Se conservan los paquetes previos o de origen desconocido. Otras instancias conservan dependencias compartidas; otros contenedores activos/detenidos o un uso desconocido conservan Docker. La simulación APT impide eliminar paquetes ajenos.
 
-[GPL-3.0](LICENSE) · [Forcus356](https://github.com/Forcus356) · [Psiphon Tunnel Core](https://github.com/Psiphon-Labs/psiphon-tunnel-core) · [ipregion](https://github.com/Davoyan/ipregion) · [bbolt](https://github.com/etcd-io/bbolt). Independent project; not officially affiliated with Psiphon.
+Las instalaciones antiguas sin registro conservan las dependencias. No se usa autoremove ni se borran datos Docker arbitrariamente. Permanecen Python, curl, GCC y las copias de migración. Los puntos 13 y 14 del menú corresponden a estos modos.
+
+La desinstalación simple de la última instancia libera el registro de propiedad y conserva dependencias. Elige `--purge-deps` al desinstalar si deseas eliminar las dependencias propias elegibles.
+
+Si falla la eliminación APT, se informa del error y se conserva el registro. Tras corregir APT, vuelve a intentarlo desde el proyecto descargado:
+
+```bash
+python3 autopin_system.py cleanup --purge
+```
+
+<a id="faq"></a>
+
+## Preguntas frecuentes
+
+<details>
+<summary>¿Cómo sé que el PIN está verificado?</summary>
+
+Busca INITIAL PIN VERIFIED y adopted_unpinned: false. pin_prepared: true solo indica preparación. El primer PIN reconecta el túnel; si falla la verificación se revierte y se reintenta en otro ciclo.
+
+</details>
+
+<details>
+<summary>¿INCONCLUSIVE confirma Gemini?</summary>
+
+No se confirmó una respuesta del modelo. SERVING es una prueba anónima satisfactoria; INCONCLUSIVE no está resuelto y no provoca rotación por sí solo. La política permite un PIN verificado con Gemini inconcluso. No se comprueba tu cuenta del navegador.
+
+</details>
+
+<details>
+<summary>¿Por qué difieren ip y server_ip?</summary>
+
+ip es la salida pública del proxy; server_ip es el servidor Psiphon. El mismo servidor puede cambiar su IP de salida al reconectar; no se garantiza una IP invariable.
+
+</details>
+
+<details>
+<summary>¿Por qué y pide repetir?</summary>
+
+Se rechaza UTF-8 incorrecto para evitar aplicar una entrada dañada o cerrar el menú. Escribe de nuevo la y latina y confirma con y/n.
+
+</details>
+
+<details>
+<summary>¿Por qué Google muestra otro país?</summary>
+
+EgressRegion solicita una región Psiphon; Google puede clasificar la salida de otro modo. La lista de bloqueo y strict-region controlan su aceptación. No se garantiza un país ni el acceso a un servicio.
+
+</details>
+
+<a id="files"></a>
+
+## Archivos y configuración
+
+Las rutas son de la instancia 1. Las demás añaden -N a sus directorios de aplicación, datos y configuración; el registro de origen y las copias son compartidos. Los archivos de conexión y servidores contienen configuración privada.
+
+| Ruta | Función |
+| --- | --- |
+| `/var/lib/psiphon-autopin/settings.json` | Configuración efectiva y preferencias del menú. |
+| `/var/lib/psiphon-autopin/state.json` | Último resultado y estado del PIN. |
+| `/opt/vps-psiphon/config/psiphon.config` | Configuración privada Psiphon y entrada objetivo. |
+| `/var/lib/psiphon-autopin/server-entry-cache.json` | Caché privada de servidores. |
+| `/var/lib/psiphon-autopin/connection.json` | Formato de conexión elegido. |
+| `/var/lib/psiphon-autopin/xray-outbound.json` | Outbound Xray cuando se elige ese formato. |
+| `/var/lib/psiphon-autopin-system/dependencies.json` | Registro de origen Docker/Go, permisos 0600. |
+| `/var/backups/psiphon-autopin` | Copias de migración y recuperación. |
+
+<a id="development"></a>
+
+## Desarrollo y agradecimientos
+
+Desde una copia local del proyecto:
+
+```bash
+python3 -m unittest discover -s tests -v
+bash -n install_psiphon_autopin.sh
+```
+
+[CHANGELOG](CHANGELOG.md) · [tests](tests)
+
+Componentes utilizados: [Psiphon Tunnel Core](https://github.com/Psiphon-Labs/psiphon-tunnel-core), [psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker), [bbolt](https://github.com/etcd-io/bbolt), [curl-impersonate](https://github.com/lexiforest/curl-impersonate).
+
+Licencia [GPL-3.0](LICENSE). Se estudiaron ideas operativas de [Chara vps-psiphon](https://github.com/Chara-Freedom/vps-psiphon); su instalador y watchdog no se ejecutan aquí. La organización del README se inspira en [3x-ui](https://github.com/MHSanaei/3x-ui).

@@ -1,137 +1,469 @@
-> This translation describes an older release. For version 4.0 see [English](README.md) or [Русский](README.ru_RU.md).
-
-Auto-Pin 4.2: initial automatic PIN and owned-dependency uninstall; Easy / Advanced menu: `auto-pin`. See [English](README.md#interactive-setup) / [Русский](README.ru_RU.md#меню-easy--advanced).
-
 <div align="center">
 
-# 🛡️ Forcus Psiphon Auto-Pin Manager
+<img src="docs/assets/banner.svg" alt="Forcus Auto-Pin — Psiphon Manager" width="100%">
 
-**تدوير خوادم Psiphon تلقائيًا وتثبيت عنوان الخروج حسب موقع Google**
+# Forcus Auto-Pin
 
-![Version](https://img.shields.io/badge/version-3.3-blue) ![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-informational) [![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-green)](LICENSE)
+**SOCKS5 محلي · تثبيت تلقائي للخادم · فحص Google/Gemini · استعادة الاتصال**
 
-[English](README.md) | [Русский](README.ru_RU.md) | [فارسی](README.fa_IR.md) | [العربية](README.ar_EG.md) | [中文](README.zh_CN.md) | [Español](README.es_ES.md) | [Türkçe](README.tr_TR.md)
+![Version](https://img.shields.io/badge/version-4.2.0-32b98b?style=flat-square)
+![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
+
+[English](README.md) · [فارسی](README.fa_IR.md) · **العربية** · [中文](README.zh_CN.md) · [Español](README.es_ES.md) · [Русский](README.ru_RU.md) · [Türkçe](README.tr_TR.md)
 
 </div>
 
-أداة Linux تختار خوادم Psiphon واحدًا تلو الآخر، وتتحقق من عنوان IP الخارج وبلد Google **عبر SOCKS5h المحلي فقط**، ثم تثبّت اتصالًا مناسبًا. إذا صُنّف العنوان RU تبدأ عملية بحث جديدة.
+<div dir="rtl">
 
-## ✨ الميزات
+مدير Psiphon لخوادم Linux VPS. ثبّت البرنامج واختر Easy أو Advanced، ثم أدر نسخ البروكسي المستقلة من الطرفية. يستطيع Xray استخدام نقطة SOCKS5 نفسها عبر ملف outbound JSON الذي ينشئه البرنامج.
 
-- اختيار خوادم Psiphon واحدًا تلو الآخر باستخدام `TargetServerEntry`
-- قراءة قاعدة BoltDB دون تعديلها
-- فحص عنوان الخروج وبلد Google عبر SOCKS5h دون اتصال مباشر احتياطي
-- تثبيت الاتصال بعد التأكد والمراقبة الدورية والتبديل التلقائي
-- إمكانية اختيار البلد والمنفذ والفواصل الزمنية
-- دعم Docker CE أو `docker.io` الموجود مسبقًا
+[البدء السريع](#quick-start) · [الميزات](#features) · [قائمة الطرفية](#menu) · [مرجع الأوامر](#commands) · [التكامل مع Xray](#xray) · [التحديث والصيانة](#operations) · [إزالة التثبيت](#uninstall) · [الأسئلة الشائعة](#faq)
 
-## 📋 المتطلبات
+<a id="quick-start"></a>
 
-Ubuntu أو Debian بمعمارية **x86_64** مع صلاحيات root وsystemd واتصال إنترنت. تحقق من شروط الاستضافة بشأن VPN والبروكسي.
+## البدء السريع
 
-## 🚀 البدء السريع
+نفّذ الأوامر بصلاحية root داخل Bash. الأنظمة المدعومة Ubuntu/Debian بمعمارية x86_64 مع systemd؛ يلزم الإنترنت وcurl. يثبّت البرنامج Docker/Go عند غيابهما ويحافظ على التثبيت الموجود.
 
-اختيار البلد والمنفذ تفاعليًا:
+نزّل المثبّت وشغّله. تشغيله دون معاملات في الطرفية يفتح قائمة الإعداد:
+
+<div dir="ltr" align="left">
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh -o /tmp/install_psiphon_autopin.sh && bash /tmp/install_psiphon_autopin.sh
 ```
 
-### أمثلة بدون أسئلة
+</div>
+
+بعد التثبيت يمكنك فتح القائمة في أي وقت:
+
+<div dir="ltr" align="left">
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh | sudo bash -s -- --region PL --port 40000
+auto-pin
 ```
+
+</div>
+
+**SOCKS5:** `127.0.0.1:40000` → `1080`  ·  **HTTP:** `127.0.0.1:40001` → `8080`
+
+التوثيق متاح بسبع لغات. القائمة الطرفية تستخدم حاليًا تسميات روسية، والأوامر والخيارات موحّدة في جميع الأدلة.
+
+<a id="features"></a>
+
+## الميزات
+
+- تثبيت PIN أول تلقائي: إنشاء ذاكرة التخزين وإعادة الاتصال بالخادم المحدد والتحقق قبل إعلان التثبيت.
+- نفق واحد مع PIN موثّق أو مجموعة من 2–32 نفقًا مع فحوص بأخذ عينات.
+- حتى 99 نسخة مستقلة بمنافذ وملفات وقواعد بيانات وأقفال وخدمات منفصلة.
+- مجموعات دول وقائمة دول Google المحظورة ومطابقة صارمة اختيارية للدولة.
+- فحص Gemini اختياري وبصمة TLS لمتصفح لاكتشاف CAPTCHA.
+- عتبة سرعة تؤكدها قياسات متتالية واستعادة تلقائية للاتصال.
+- SOCKS5 محلي وHTTP اختياري وربط IPv4 خاص وoutbound JSON لـXray.
+- إزالة تراعي مصدر Docker/Go وتحتفظ بالتثبيت السابق واعتماد التطبيقات الأخرى.
+
+<a id="menu"></a>
+
+## قائمة الطرفية
+
+**Easy:** الدولة، صيغة الاتصال، Gemini، منفذ SOCKS وفترة watchdog بالدقائق. **Advanced:** جميع خيارات المثبّت. البندان 3 و4 في القائمة الرئيسية للإدارة واختيار النسخة.
+
+Enter يحتفظ بالقيمة، و`-` يمسح قائمة الدول. الحرف اللاتيني `y` يعرض الإعدادات ويطبقها بعد تأكيد `y/n`. الإلغاء يحفظ الإعدادات السابقة. قد يعيد التطبيق اتصال النفق المحدد. يحتفظ Easy بقيم Advanced المخفية.
+
+يعرض تذييل القائمة النتائج المحفوظة؛ فتح القائمة لا ينفذ فحص شبكة جديدًا. استخدم `check`. يعطّل `NO_COLOR=1 auto-pin` الألوان، ويستخدم `TERM=dumb auto-pin` إطار ASCII.
+
+<details>
+<summary>معاينة القائمة</summary>
+
+مثال من عارض القائمة الحالي؛ العناوين والحالات في الصورة بيانات توضيحية.
+
+![معاينة القائمة](docs/assets/menu-preview.png)
+
+[معاينة القائمة (.txt)](docs/assets/menu-demo.txt)
+
+</details>
+
+<a id="examples"></a>
+
+## أمثلة التثبيت
+
+ينزّل كل مثال المثبّت ويشغّله دون قائمة. الخيارات الصريحة تستبدل القيم المحفوظة، وتبقى بقية الإعدادات عند التحديث.
+
+<details>
+<summary>أمثلة التثبيت</summary>
+
+### دون فحص Gemini
+
+<div dir="ltr" align="left">
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh | sudo bash -s -- --region DE --port 41000 --interval 1800 --wait 90 --delay 15
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --no-gemini-check
 ```
 
-## ⚙️ خيارات التثبيت
+</div>
 
-| الخيار | الافتراضي | الوصف |
-|---|---|---|
-| `--region DE` | Prompt; `[DE]` | بلد خادم Psiphon (رمز من حرفين) أو `AUTO`. |
-| `--port 40000` | Prompt; `40000` | منفذ SOCKS5 محلي من 1024 إلى 65534؛ منفذ HTTP هو التالي. |
-| `--interval 3600` | `3600` | فترة المراقبة بالثواني، الحد الأدنى 60. |
-| `--wait 75` | `75` | مهلة الاتصال بالثواني، الحد الأدنى 20. |
-| `--delay 12` | `12` | التأخير بين المحاولات بالثواني، الحد الأدنى 2. |
-| `--help` | — | عرض المساعدة. |
+### مجموعة دول وحد أدنى للسرعة
 
-## 🧰 أوامر المدير
-
-| Command | Description |
-|---|---|
-| `status` | عرض الحالة وعنوان الخروج المحفوظ |
-| `check` | فحص IP وGoogle عبر SOCKS5h؛ 0=ليس RU و2=RU |
-| `search` | البحث عن خادم؛ أوقف خدمة المراقبة أولًا |
-| `monitor` | مراقبة مستمرة عبر systemd |
+<div dir="ltr" align="left">
 
 ```bash
-python3 /opt/psiphon-autopin/psiphon_autopin.py status
-python3 /opt/psiphon-autopin/psiphon_autopin.py check
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL,DE,PL --min-speed 1000
 ```
 
-`--region`, `--port`, `--interval`, `--wait`, `--delay` — الوصف.
+</div>
 
-## 🛠️ إدارة الخدمة والتشخيص
+### نسخة ثانية مستقلة
+
+<div dir="ltr" align="left">
 
 ```bash
-journalctl -u psiphon-autopin -f
-journalctl -u psiphon-autopin -n 80 --no-pager
-systemctl status psiphon-autopin --no-pager
-systemctl restart psiphon-autopin
-systemctl stop psiphon-autopin
-systemctl enable --now psiphon-autopin
-docker logs --tail 80 vps-psiphon
-docker ps -a --filter name=vps-psiphon
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --instance 2 --region DE --port 40002
 ```
 
-## 📌 أمثلة
+</div>
+
+### نشر SOCKS5 فقط
+
+<div dir="ltr" align="left">
 
 ```bash
-# Exit IP through Psiphon
-curl -4 -fsS --noproxy '' \
-  --proxy socks5h://127.0.0.1:40000 https://api.ipify.org
-
-# Manual search; monitor must not be running
-systemctl stop psiphon-autopin
-python3 /opt/psiphon-autopin/psiphon_autopin.py search --region PL --port 40000
-systemctl start psiphon-autopin
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --no-http
 ```
 
-## 🔄 آلية العمل
+</div>
 
-يقرأ المدير قائمة خوادم Psiphon من BoltDB بوضع القراءة فقط، ويختار خادمًا بواسطة `TargetServerEntry`، ثم يفحص IP الخارج وتصنيف Google عبر SOCKS5h. يُثبَّت الاتصال بعد التحقق مرتين.
+### إنشاء ملف اتصال Xray
 
-## ⚠️ ملاحظات مهمة
+<div dir="ltr" align="left">
 
-`--region PL` لا يضمن `Google=PL`؛ الشرط الحالي هو `Google != RU`. قد يختلف عنوان الخادم عن عنوان الخروج، ويقطع تبديل الخادم الاتصالات الحالية.
-
-تستمع منافذ SOCKS5 وHTTP على `127.0.0.1` فقط؛ منفذ HTTP يساوي منفذ SOCKS + 1. تنزيلات التثبيت تستخدم اتصال VPS المباشر. راجع الشيفرة قبل تشغيلها بصلاحيات root.
-
-## 🩺 حل المشكلات
-
-| Error | Solution |
-|---|---|
-| `containerd.io : Conflicts: containerd` | تعارض حزم Docker CE وdocker.io؛ لا تحذف Docker دون فحص. |
-| `Config exists but container missing` | احتفظ بالإعدادات القديمة وحدد الخدمة التي أنشأتها. |
-| `SOCKS/HTTP port ... occupied` | افحص المنفذ باستخدام `ss -lntp` ثم غيّر `--port`. |
-| `No known servers in region` | افحص سجل Docker؛ ربما لم تُملأ قاعدة الخوادم بعد. |
-| `Another search/monitor is running` | أوقف خدمة المراقبة قبل تشغيل `search`. |
-
-## 📂 مسارات التثبيت
-
-```text
-/opt/vps-psiphon/config/psiphon.config
-/opt/psiphon-autopin/psiphon_autopin.py
-/opt/psiphon-autopin/psiphon-server-export
-/opt/psiphon-autopin/ipregion.sh
-/var/lib/psiphon-autopin/settings.json
-/var/lib/psiphon-autopin/state.json
-/etc/systemd/system/psiphon-autopin.service
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --connection xray
 ```
 
-## 📄 الترخيص والاعتمادات
+</div>
 
-[GPL-3.0](LICENSE) · [Forcus356](https://github.com/Forcus356) · [Psiphon Tunnel Core](https://github.com/Psiphon-Labs/psiphon-tunnel-core) · [ipregion](https://github.com/Davoyan/ipregion) · [bbolt](https://github.com/etcd-io/bbolt). Independent project; not officially affiliated with Psiphon.
+### ثلاثة أنفاق وwatchdog كل 10 دقائق
+
+<div dir="ltr" align="left">
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --tunnel-pool 3 --interval 600
+```
+
+</div>
+
+### Gemini مع بصمة TLS لمتصفح
+
+<div dir="ltr" align="left">
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --gemini-check --impersonate
+```
+
+</div>
+
+</details>
+
+<a id="commands"></a>
+
+## مرجع الأوامر
+
+| الأمر | الوظيفة |
+| --- | --- |
+| `auto-pin` | فتح قائمة الإعداد والإدارة. |
+| `auto-pin --instance 2` | فتح قائمة النسخة 2. |
+| `psiphon-autopin status` | عرض الإعدادات المحفوظة وآخر نتيجة. |
+| `psiphon-autopin check` | إجراء فحص جديد للاتصال والسياسات. |
+| `psiphon-autopin rotate` | طلب تبديل الخادم. |
+| `psiphon-autopin region NL` | التبديل إلى NL ومسح مجموعة الدول السابقة. |
+| `psiphon-autopin pool NL,DE,PL` | تعيين مجموعة دول بديلة. |
+| `psiphon-autopin pool ''` | مسح مجموعة الدول. |
+| `psiphon-autopin speed` | قياس السرعة عبر Psiphon. |
+| `psiphon-autopin logs 100` | عرض السجلات الحديثة للمراقب والنفق. |
+| `psiphon-autopin start` | بدء النسخة المحددة. |
+| `psiphon-autopin stop` | إيقاف النسخة المحددة. |
+| `psiphon-autopin restart` | إعادة تشغيل النسخة المحددة. |
+| `psiphon-autopin xray` | طباعة SOCKS outbound JSON لـXray. |
+| `psiphon-autopin-2 status` | عرض حالة النسخة 2. |
+| `psiphon-autopin menu` | فتح القائمة من واجهة الأوامر الأصلية. |
+| `vps-psiphon status` | اسم بديل متوافق للمدير نفسه. |
+| `psiphon-autopin refresh-cache --allow-interruption` | تحديث ذاكرة قاعدة البيانات؛ يقطع النفق. |
+| `psiphon-autopin prepare-pin` | تحضير PIN لإعادة تشغيل لاحقة. |
+| `psiphon-autopin search` | البحث عن خادم مناسب. |
+| `psiphon-autopin monitor` | مدخل المراقب الداخلي؛ يشغّله systemd عادةً. |
+
+`set-region --region NL` و`set-pool --region-pool NL,DE` هما الصيغتان الكاملتان لـ`region NL` و`pool NL,DE`. قد تغيّر خيارات التشغيل سياسة أمر واحد؛ لحفظ إعداد الخدمة الكامل استخدم القائمة أو المثبّت.
+
+<div dir="ltr" align="left">
+
+```bash
+psiphon-autopin set-region --region NL
+psiphon-autopin set-pool --region-pool NL,DE
+```
+
+</div>
+
+رموز خروج `check`: **0** نتيجة مقبولة، **2** رفض السياسة بما فيه انخفاض السرعة، **1** خطأ فحص أو تشغيل. قد تتضمن النتيجة المقبولة Gemini `INCONCLUSIVE`.
+
+<a id="xray"></a>
+
+## التكامل مع Xray
+
+المسار هو **Xray → SOCKS5 → Psiphon → Internet**. يطبع الأمر xray إعداد outbound؛ ويحفظ --connection xray ملف xray-outbound.json أيضًا. أضف outbound وقواعد التوجيه إلى إعداد Xray بنفسك. الاتصال يستخدم SOCKS5 نفسه ولا ينشئ بروتوكول نقل مستقلًا.
+
+<div dir="ltr" align="left">
+
+```bash
+psiphon-autopin xray
+```
+
+</div>
+
+<div dir="ltr" align="left">
+
+```json
+{
+  "tag": "psiphon-out",
+  "protocol": "socks",
+  "settings": {
+    "servers": [{"address": "127.0.0.1", "port": 40000}]
+  }
+}
+```
+
+</div>
+
+في شبكة Docker bridge يشير 127.0.0.1 إلى حاوية Xray نفسها. استخدم شبكة host أو عنوان IPv4 خاصًا موجودًا على VPS عبر --bind. الربط بعنوان عام مرفوض. البروكسي مخصص لـTCP.
+
+<a id="options"></a>
+
+## خيارات المثبّت
+
+القائمة تضبط watchdog بالدقائق. يستخدم --interval وحقل JSON interval الثواني دائمًا. استبدل الدول والمنافذ في الأمثلة بما يناسبك.
+
+التثبيت الجديد مع `auto` يستخدم `vps-psiphon` ويحافظ على الخلفية الموجودة المعروفة. تتطلب `console` الربط بـloopback. يبقي `--no-gemini-check` فحوص الدولة والسرعة والاستعادة.
+
+<details>
+<summary>خيارات المثبّت</summary>
+
+| الخيار | الافتراضي | الوظيفة |
+| --- | --- | --- |
+| `--region NL / --region AUTO / --region NL,DE` | اختيار بالقائمة / مطلوب للتثبيت غير التفاعلي (NL) | رمز دولة Psiphon من حرفين أو AUTO أو دول مفصولة بفواصل. |
+| `--instance N` | 1 | اختيار النسخة 1–99. |
+| `--port N` | 40000 + 2 × (N−1) | منفذ SOCKS من 1024 إلى 65534؛ يستخدم HTTP المنفذ التالي. |
+| `--connection socks5\|xray` | socks5 | حفظ عنوان SOCKS5 أو مخرج Xray JSON. |
+| `--menu / --interactive` | TTY / 0 args | فتح المعالج صراحةً؛ يمكن إضافة --instance N. |
+| `--menu-mode easy\|advanced` | easy | تذكّر وضع Easy أو Advanced. |
+| `--region-pool NL,DE` | فارغ | قائمة الدول البديلة. |
+| `--bind ADDR` | 127.0.0.1 | الربط بـloopback أو IPv4 خاص موجود. |
+| `--bind-loopback` | 127.0.0.1 | إعادة الربط إلى 127.0.0.1. |
+| `--http / --no-http` | مفعّل | تفعيل/تعطيل نشر HTTP. |
+| `--gemini-check / --no-gemini-check` | مفعّل | تفعيل/تعطيل فحص Gemini. |
+| `--impersonate / --no-impersonate` | معطّل | تفعيل/تعطيل TLS المتصفح لفحص صفحة Gemini. |
+| `--strict-region / --no-strict-region` | معطّل | تفعيل/تعطيل التطابق الصارم لدولة Google. |
+| `--interval N` | 300 s | الفترة العادية بالثواني؛ الحد الأدنى 60. |
+| `--wait N` | 75 s | مهلة الجاهزية بالثواني؛ الحد الأدنى 20. |
+| `--delay N` | 12 s | الفاصل بين محاولات البحث بالثواني؛ الحد الأدنى 2. |
+| `--min-speed N` | 800 KiB/s | حد KiB/s؛ القيمة 0 تعطّل التبديل بسبب السرعة. |
+| `--probe-mb N` | 4 MiB | عينة 0–10 MiB؛ الصفر مع عتبة مفعّلة يقيس صفحة. |
+| `--slow-threshold N` | 2 | قياسات بطيئة متتالية قبل التبديل، 2–20. |
+| `--fail-threshold N` | 3 | إخفاقات متتالية قبل الاستعادة، 2–20. |
+| `--deny-regions 'RU BY IR SY CU KP CN VE'` | RU BY IR SY CU KP CN VE | دول Google المحظورة؛ النص الفارغ يمسح القائمة. |
+| `--tunnel-pool N` | 1 | 1 يستخدم PIN؛ و2–32 مجموعة دون PIN واحد ثابت. |
+| `--backend auto\|console\|vps-psiphon` | auto | كشف/حفظ الخلفية الموجودة أو اختيارها صراحةً. |
+| `--help` | — | عرض مساعدة المثبّت. |
+
+</details>
+
+<a id="operations"></a>
+
+## التحديث والصيانة
+
+### تحديث نسخة موجودة
+
+نزّل المثبّت الحالي مجددًا وطبّقه على النسخة. تُحفظ الإعدادات السابقة ما لم تستبدلها خيارات صريحة. فتح auto-pin وحده لا ينزّل نسخة جديدة.
+
+<div dir="ltr" align="left">
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh -o /tmp/install_psiphon_autopin.sh && bash /tmp/install_psiphon_autopin.sh --instance 1
+```
+
+</div>
+
+### التشخيص
+
+راجع الحالة وتابع سجل المراقب وحده واختبر البروكسيين المضبوطين:
+
+<div dir="ltr" align="left">
+
+```bash
+psiphon-autopin status
+journalctl -u psiphon-autopin.service -n 100 --no-pager
+journalctl -u psiphon-autopin.service -f
+systemctl status vps-psiphon.service psiphon-autopin.service --no-pager
+```
+
+</div>
+
+<div dir="ltr" align="left">
+
+```bash
+curl -4 -fsS --noproxy '' --proxy socks5h://127.0.0.1:40000 https://api.ipify.org
+```
+
+</div>
+
+<div dir="ltr" align="left">
+
+```bash
+curl -4 -fsS --noproxy '' --proxy http://127.0.0.1:40001 https://api.ipify.org
+```
+
+</div>
+
+تستخدم فحوص الاتصال وIP والدولة وGemini والسرعة SOCKS مع DNS بعيد دون رجوع لاتصال مباشر. قد تستخدم تنزيلات المثبّت شبكة VPS. لا يُحذف WARP تلقائيًا.
+
+### نسخ مستقلة
+
+استخدم psiphon-autopin-N أو auto-pin --instance N. منافذ المضيف الافتراضية أدناه ويمكن تغييرها عبر --port. حدود 99 نسخة و32 نفقًا هي حدود إعداد، وليست ضمانًا لقدرة VPS.
+
+| # | SOCKS5 | HTTP | CLI |
+| --- | --- | --- | --- |
+| 1 | `40000` | `40001` | `psiphon-autopin` |
+| 2 | `40002` | `40003` | `psiphon-autopin-2` |
+| 3 | `40004` | `40005` | `psiphon-autopin-3` |
+
+### Watchdog واستهلاك البيانات
+
+البند 5 في Easy وإعدادات Advanced يضبطان فترة المراقب الداخلي بالدقائق: الحد الأدنى 1 والافتراضي 5. تُقبل كسور مثل 1.5 إذا قابلت ثواني صحيحة. قد تتكرر المحاولات عند الفشل أسرع. لا يعمل watchdog إضافي من Chara.
+
+الافتراضي: Gemini مفعّل، نفق واحد، 800 KiB/s، قياسان بطيئان، عينة 4 MiB واستعادة بعد ثلاثة إخفاقات. عينة 4 MiB كل خمس دقائق تستهلك نحو 34 GiB في 30 يومًا قبل بيانات البحث. --min-speed 0 يعطّل التبديل بسبب السرعة؛ --probe-mb 0 وحده قد يظل يقيس صفحة.
+
+<a id="uninstall"></a>
+
+## إزالة التثبيت
+
+إزالة النسخة المحددة مع الاحتفاظ بـDocker/Go:
+
+<div dir="ltr" align="left">
+
+```bash
+psiphon-autopin uninstall
+```
+
+</div>
+
+إزالة النسخة وحزم Docker/Go المؤهلة التي ثبّتها هذا المدير:
+
+<div dir="ltr" align="left">
+
+```bash
+psiphon-autopin uninstall --purge-deps
+```
+
+</div>
+
+<div dir="ltr" align="left">
+
+```bash
+psiphon-autopin-2 uninstall --purge-deps
+```
+
+</div>
+
+من الإصدار 4.2 يُسجّل مصدر كل مكوّن. تبقى الحزم السابقة أو مجهولة المصدر. تحفظ نسخ Auto-Pin الأخرى الاعتمادات المشتركة؛ وتحفظ الحاويات الأخرى، حتى المتوقفة، أو الاستخدام المجهول Docker. تمنع محاكاة APT إزالة الحزم غير المرتبطة.
+
+التثبيتات القديمة دون سجل مصدر تحتفظ بالاعتمادات. لا يُستخدم autoremove ولا تُحذف بيانات Docker عشوائيًا. تبقى Python وcurl وGCC ونسخ الترحيل الاحتياطية. البندان 13 و14 في القائمة يقدمان طريقتي الإزالة.
+
+الإزالة العادية لآخر نسخة تتخلى عن سجل الملكية وتحتفظ بالاعتمادات. اختر `--purge-deps` عند الإزالة لحذف الاعتمادات المملوكة المؤهلة أيضًا.
+
+إذا فشل تنظيف APT، يُبلّغ الأمر عن الفشل ويحفظ السجل. بعد إصلاح APT أعد المحاولة من مجلد المشروع الذي نزّلته:
+
+<div dir="ltr" align="left">
+
+```bash
+python3 autopin_system.py cleanup --purge
+```
+
+</div>
+
+<a id="faq"></a>
+
+## الأسئلة الشائعة
+
+<details>
+<summary>كيف أعرف أن PIN موثّق؟</summary>
+
+ابحث عن INITIAL PIN VERIFIED وadopted_unpinned: false. أما pin_prepared: true فيعني التحضير فقط. إنشاء PIN الأول يعيد الاتصال بصورة مضبوطة؛ فشل التحقق يعيد الحالة السابقة ويحاول في دورة صحة لاحقة.
+
+</details>
+
+<details>
+<summary>هل INCONCLUSIVE يعني أن Gemini يعمل؟</summary>
+
+لم تُؤكد إجابة النموذج. SERVING يعني نجاح الفحص المجهول؛ INCONCLUSIVE نتيجة غير محسومة ولا تسبب التبديل وحدها. تسمح السياسة الحالية بتوثيق PIN مع Gemini غير محسوم. لا يُفحص حسابك المسجل بالمتصفح.
+
+</details>
+
+<details>
+<summary>لماذا يختلف ip عن server_ip؟</summary>
+
+ip هو عنوان الخروج العام للبروكسي، وserver_ip عنوان خادم Psiphon. قد يتغير عنوان الخروج بعد إعادة الاتصال حتى بالخادم المثبّت نفسه؛ لا يوجد ضمان لثبات IP.
+
+</details>
+
+<details>
+<summary>لماذا يُطلب تكرار y أحيانًا؟</summary>
+
+يُرفض إدخال UTF-8 التالف بدل تطبيقه أو إغلاق القائمة. أعد كتابة الحرف اللاتيني y ثم أكّد بـy/n.
+
+</details>
+
+<details>
+<summary>لماذا يعرض Google دولة مختلفة؟</summary>
+
+EgressRegion يطلب منطقة من Psiphon؛ وقد يصنّف Google عنوان الخروج بشكل مختلف. تحدد قائمة الحظر وstrict-region القبول. لا تُضمن دولة محددة أو إمكانية الوصول إلى خدمة.
+
+</details>
+
+<a id="files"></a>
+
+## الملفات والإعدادات
+
+المسارات للنسخة 1. تُضاف -N لمجلدات التطبيق والبيانات والإعداد للنسخ الأخرى؛ سجل المصدر ومجلد النسخ الاحتياطية مشتركان. ملفات الاتصال ومداخل الخوادم تتضمن إعدادات خاصة.
+
+| المسار | الوظيفة |
+| --- | --- |
+| `/var/lib/psiphon-autopin/settings.json` | الإعدادات الفعلية وتفضيلات القائمة. |
+| `/var/lib/psiphon-autopin/state.json` | آخر نتيجة مراقبة وحالة PIN. |
+| `/opt/vps-psiphon/config/psiphon.config` | إعداد Psiphon الخاص ومدخل الخادم المستهدف. |
+| `/var/lib/psiphon-autopin/server-entry-cache.json` | ذاكرة خاصة لمداخل الخوادم. |
+| `/var/lib/psiphon-autopin/connection.json` | مخرج الاتصال المحدد. |
+| `/var/lib/psiphon-autopin/xray-outbound.json` | outbound لـXray عند اختيار هذه الصيغة. |
+| `/var/lib/psiphon-autopin-system/dependencies.json` | سجل مصدر Docker/Go بصلاحية 0600. |
+| `/var/backups/psiphon-autopin` | نسخ احتياطية للترحيل والاستعادة. |
+
+<a id="development"></a>
+
+## التطوير والشكر
+
+من نسخة محلية للمشروع:
+
+<div dir="ltr" align="left">
+
+```bash
+python3 -m unittest discover -s tests -v
+bash -n install_psiphon_autopin.sh
+```
+
+</div>
+
+[CHANGELOG](CHANGELOG.md) · [tests](tests)
+
+المكوّنات المستخدمة: [Psiphon Tunnel Core](https://github.com/Psiphon-Labs/psiphon-tunnel-core), [psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker), [bbolt](https://github.com/etcd-io/bbolt), [curl-impersonate](https://github.com/lexiforest/curl-impersonate).
+
+الترخيص [GPL-3.0](LICENSE). دُرست أفكار تشغيلية من [Chara vps-psiphon](https://github.com/Chara-Freedom/vps-psiphon)؛ المثبّت وwatchdog الخاصان به ليسا جزءًا من تشغيل هذا المشروع. تنظيم README مستوحى من [3x-ui](https://github.com/MHSanaei/3x-ui).
+
+</div>

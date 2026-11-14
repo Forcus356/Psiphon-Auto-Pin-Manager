@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 280" role="img" aria-labelledby="title desc">
+<title id="title">Forcus Auto-Pin</title><desc id="desc">Psiphon proxy manager for Linux VPS. SOCKS5, automatic PIN and recovery.</desc>
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101e32"/><stop offset="1" stop-color="#111827"/></linearGradient><linearGradient id="accent"><stop stop-color="#56e0ac"/><stop offset="1" stop-color="#6ed8ed"/></linearGradient></defs>
+<rect width="1200" height="280" rx="24" fill="url(#bg)"/>
+<path d="M0 240 H1200 M950 0 V280 M1040 0 V280 M1130 0 V280" stroke="#213349" stroke-width="1"/>
+<circle cx="1070" cy="140" r="87" fill="none" stroke="#24425a" stroke-width="1"/>
+<circle cx="1070" cy="140" r="60" fill="none" stroke="#33546b" stroke-width="1"/>
+<path d="M1070 103 V151 M1053 121 L1070 103 L1087 121" stroke="#56e0ac" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<circle cx="1070" cy="165" r="5" fill="#56e0ac"/>
+<path d="M60 66 L113 46 L166 66 V120 Q164 159 113 184 Q62 159 60 120 Z" fill="#153c3d" stroke="#56e0ac" stroke-width="2"/>
+<path d="M93 94 H135 M93 94 V143 M93 116 H126" stroke="#79edc2" stroke-width="9" stroke-linecap="round"/>
+<text x="205" y="80" font-family="Verdana,Arial,sans-serif" font-size="14" fill="#83e6ff" letter-spacing="4">PSIPHON MANAGER FOR LINUX VPS</text>
+<text x="201" y="139" font-family="Verdana,Arial,sans-serif" font-size="51" font-weight="700" fill="#f4f7fb">Forcus Auto-Pin</text>
+<text x="205" y="179" font-family="Verdana,Arial,sans-serif" font-size="19" fill="#b8c9d9">SOCKS5 · automatic PIN · health checks · recovery</text>
+<rect x="60" y="221" width="250" height="3" rx="1.5" fill="url(#accent)"/>
+<text x="60" y="257" font-family="Verdana,Arial,sans-serif" font-size="13" fill="#9db5c9">EASY SETUP / ADVANCED CONTROL</text>
+</svg>

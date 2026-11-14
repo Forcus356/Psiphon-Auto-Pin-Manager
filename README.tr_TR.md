@@ -1,137 +1,381 @@
-> This translation describes an older release. For version 4.0 see [English](README.md) or [Русский](README.ru_RU.md).
-
-Auto-Pin 4.2: initial automatic PIN and owned-dependency uninstall; Easy / Advanced menu: `auto-pin`. See [English](README.md#interactive-setup) / [Русский](README.ru_RU.md#меню-easy--advanced).
-
 <div align="center">
 
-# 🛡️ Forcus Psiphon Auto-Pin Manager
+<img src="docs/assets/banner.svg" alt="Forcus Auto-Pin — Psiphon Manager" width="100%">
 
-**Otomatik Psiphon sunucu değiştirme ve Google konumuna göre çıkış IP sabitleme**
+# Forcus Auto-Pin
 
-![Version](https://img.shields.io/badge/version-3.3-blue) ![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-informational) [![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-green)](LICENSE)
+**Yerel SOCKS5 · otomatik PIN · Google/Gemini denetimi · kurtarma**
 
-[English](README.md) | [Русский](README.ru_RU.md) | [فارسی](README.fa_IR.md) | [العربية](README.ar_EG.md) | [中文](README.zh_CN.md) | [Español](README.es_ES.md) | [Türkçe](README.tr_TR.md)
+![Version](https://img.shields.io/badge/version-4.2.0-32b98b?style=flat-square)
+![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
+
+[English](README.md) · [فارسی](README.fa_IR.md) · [العربية](README.ar_EG.md) · [中文](README.zh_CN.md) · [Español](README.es_ES.md) · [Русский](README.ru_RU.md) · **Türkçe**
 
 </div>
 
-Linux aracı: Psiphon sunucularını tek tek seçer, çıkış IP’sini ve Google ülkesini **yalnızca yerel SOCKS5h üzerinden** kontrol eder ve uygun çıkışı sabitler. Google çıkışı RU olarak görürse yeniden arar.
+Linux VPS için Psiphon yöneticisi. Kurun, Easy veya Advanced seçin ve bağımsız örnekleri konsoldan yönetin. Xray, üretilen outbound JSON ile aynı SOCKS5 bağlantısını kullanabilir.
 
-## ✨ Özellikler
+[Hızlı Başlangıç](#quick-start) · [Özellikler](#features) · [Konsol Menüsü](#menu) · [Komut Listesi](#commands) · [Xray Entegrasyonu](#xray) · [Güncelleme ve İşletim](#operations) · [Kaldırma](#uninstall) · [Sık Sorulan Sorular](#faq)
 
-- `TargetServerEntry` ile tek tek Psiphon sunucusu seçimi
-- Salt okunur BoltDB sunucu listesi
-- SOCKS5h üzerinden çıkış IP ve Google ülke kontrolü; doğrudan bağlantıya geri dönüş yok
-- Doğrulanmış çıkışı sabitleme, düzenli izleme ve otomatik değiştirme
-- Ülke, port ve aralık ayarları
-- Mevcut Docker CE veya `docker.io` ile uyumluluk
+<a id="quick-start"></a>
 
-## 📋 Gereksinimler
+## Hızlı Başlangıç
 
-Ubuntu veya Debian **x86_64**, root, systemd ve internet erişimi gerekir. Barındırma sağlayıcınızın VPN/proxy kurallarını kontrol edin.
+Komutları Bash içinde root olarak çalıştırın. Ubuntu/Debian x86_64 ve systemd desteklenir; İnternet ve curl gerekir. Kurucu eksik Docker/Go bağımlılıklarını yükler, mevcut kurulumları korur.
 
-## 🚀 Hızlı başlangıç
-
-Ülke ve bağlantı noktası için etkileşimli kurulum:
+Kurucuyu indirip çalıştırın. Terminalde parametresiz çalıştırma menüyü açar:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh -o /tmp/install_psiphon_autopin.sh && bash /tmp/install_psiphon_autopin.sh
 ```
 
-### Etkileşimsiz örnekler
+Kurulumdan sonra menüyü istediğiniz zaman açabilirsiniz:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh | sudo bash -s -- --region PL --port 40000
+auto-pin
+```
+
+**SOCKS5:** `127.0.0.1:40000` → `1080`  ·  **HTTP:** `127.0.0.1:40001` → `8080`
+
+Belgeler yedi dilde sunulur. Konsol menüsünün etiketleri şu anda Rusçadır; komutlar ve seçenekler bütün dillerde aynıdır.
+
+<a id="features"></a>
+
+## Özellikler
+
+- İlk otomatik PIN: önbellek oluşturulur, seçilen sunucuya bağlanılır ve doğrulama sonrası sabitlenir.
+- Doğrulanmış PIN için bir tünel veya örnekleme denetimleriyle 2–32 tünel havuzu.
+- Ayrı port, dosya, veritabanı, kilit ve servislerle 99 bağımsız örneğe kadar destek.
+- Ülke havuzları, yasaklı Google ülkeleri ve isteğe bağlı kesin ülke eşleşmesi.
+- İsteğe bağlı Gemini denetimi ve CAPTCHA tespiti için tarayıcı TLS profili.
+- Art arda ölçümlerle doğrulanan hız eşiği ve otomatik bağlantı kurtarma.
+- Yerel SOCKS5, isteğe bağlı HTTP, özel IPv4 ve Xray outbound JSON.
+- Önceden kurulu Docker/Go ile diğer kullanıcıları koruyan kaldırma.
+
+<a id="menu"></a>
+
+## Konsol Menüsü
+
+**Easy:** ülke, bağlantı çıktısı, Gemini, SOCKS portu ve dakika olarak watchdog. **Advanced:** tüm kurulum seçenekleri. Ana menünün 3 ve 4 numaralı maddeleri işlemler ve örnek seçimi içindir.
+
+Enter değeri korur; `-` ülke listesini temizler. Latin `y` ayarları gösterir ve `y/n` onayından sonra uygular. İptal mevcut ayarları korur. Uygulama seçili tüneli yeniden bağlayabilir; Easy gizli Advanced değerlerini korur.
+
+Alt bilgi kayıtlı sonuçları gösterir; menüyü açmak yeni ağ testi yapmaz. Bunun için `check` kullanın. `NO_COLOR=1 auto-pin` rengi kapatır; `TERM=dumb auto-pin` ASCII çerçeve kullanır.
+
+<details>
+<summary>Menü önizlemesi</summary>
+
+Güncel menü oluşturucusundan örnek çıktı; adresler ve durumlar gösterim amaçlıdır.
+
+![Menü önizlemesi](docs/assets/menu-preview.png)
+
+[Menü önizlemesi (.txt)](docs/assets/menu-demo.txt)
+
+</details>
+
+<a id="examples"></a>
+
+## Kurulum Örnekleri
+
+Her örnek kurucuyu indirip menüsüz çalıştırır. Açıkça verilen seçenekler kayıtlı değerleri değiştirir; diğer ayarlar güncellemede korunur.
+
+<details>
+<summary>Kurulum Örnekleri</summary>
+
+### Gemini denetimi olmadan
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --no-gemini-check
+```
+
+### Ülke havuzu ve hız eşiği
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL,DE,PL --min-speed 1000
+```
+
+### İkinci bağımsız örnek
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --instance 2 --region DE --port 40002
+```
+
+### Yalnızca SOCKS5 yayımla
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --no-http
+```
+
+### Xray bağlantı dosyası oluştur
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --connection xray
+```
+
+### Üç tünel ve 10 dakikalık watchdog
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --tunnel-pool 3 --interval 600
+```
+
+### Tarayıcı TLS profiliyle Gemini
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --gemini-check --impersonate
+```
+
+</details>
+
+<a id="commands"></a>
+
+## Komut Listesi
+
+| Komut | İşlev |
+| --- | --- |
+| `auto-pin` | Ayar ve yönetim menüsünü açar. |
+| `auto-pin --instance 2` | Örnek 2 menüsünü açar. |
+| `psiphon-autopin status` | Kayıtlı ayarları ve son sonucu gösterir. |
+| `psiphon-autopin check` | Yeni bağlantı ve politika denetimi yapar. |
+| `psiphon-autopin rotate` | Sunucu rotasyonu ister. |
+| `psiphon-autopin region NL` | NL ülkesine geçer ve eski havuzu temizler. |
+| `psiphon-autopin pool NL,DE,PL` | Yedek ülke havuzu tanımlar. |
+| `psiphon-autopin pool ''` | Ülke havuzunu temizler. |
+| `psiphon-autopin speed` | Psiphon üzerinden hızı ölçer. |
+| `psiphon-autopin logs 100` | Monitör ve tünelin son günlüklerini gösterir. |
+| `psiphon-autopin start` | Seçili örneği başlatır. |
+| `psiphon-autopin stop` | Seçili örneği durdurur. |
+| `psiphon-autopin restart` | Seçili örneği yeniden başlatır. |
+| `psiphon-autopin xray` | Xray için SOCKS outbound JSON yazdırır. |
+| `psiphon-autopin-2 status` | Örnek 2 durumunu gösterir. |
+| `psiphon-autopin menu` | Asıl CLI üzerinden menüyü açar. |
+| `vps-psiphon status` | Aynı yönetici için uyumluluk takma adı. |
+| `psiphon-autopin refresh-cache --allow-interruption` | Veritabanı önbelleğini yeniler; tüneli keser. |
+| `psiphon-autopin prepare-pin` | Gelecekteki yeniden başlatma için PIN hazırlar. |
+| `psiphon-autopin search` | Uygun bir sunucu arar. |
+| `psiphon-autopin monitor` | Dahili monitör girişidir; normalde systemd başlatır. |
+
+`set-region --region NL` ve `set-pool --region-pool NL,DE`, `region NL` ve `pool NL,DE` için uzun biçimlerdir. Çalışma seçenekleri tek komutun politikasını değiştirebilir; tüm servis ayarlarını kaydetmek için menü/kurucu kullanın.
+
+```bash
+psiphon-autopin set-region --region NL
+psiphon-autopin set-pool --region-pool NL,DE
+```
+
+`check` çıkış kodları: **0** kabul edildi, **2** düşük hız dahil politika reddi, **1** denetim/çalışma hatası. Kabul edilen sonuç Gemini `INCONCLUSIVE` içerebilir.
+
+<a id="xray"></a>
+
+## Xray Entegrasyonu
+
+Yol: **Xray → SOCKS5 → Psiphon → İnternet**. xray outbound çıktısını verir; --connection xray ayrıca xray-outbound.json kaydeder. Outbound ve yönlendirmeyi Xray ayarlarınıza ekleyin. Ayrı bir taşıma yerine aynı SOCKS5 kullanılır.
+
+```bash
+psiphon-autopin xray
+```
+
+```json
+{
+  "tag": "psiphon-out",
+  "protocol": "socks",
+  "settings": {
+    "servers": [{"address": "127.0.0.1", "port": 40000}]
+  }
+}
+```
+
+Docker bridge ağında 127.0.0.1, Xray konteynerinin kendisidir. Host ağı veya --bind ile VPS üzerinde mevcut bir özel IPv4 kullanın. Genel IP adresine bağlama reddedilir. Proxy TCP içindir.
+
+<a id="options"></a>
+
+## Kurulum Seçenekleri
+
+Menüde watchdog dakikayla ayarlanır. CLI --interval ve JSON interval alanı her zaman saniyedir. Örnek port ve ülkeleri ihtiyacınıza göre değiştirin.
+
+Yeni `auto` kurulumunda `vps-psiphon` seçilir; tanınan mevcut backend korunur. `console` loopback gerektirir. `--no-gemini-check` ülke, hız ve kurtarma denetimlerini açık tutar.
+
+<details>
+<summary>Kurulum Seçenekleri</summary>
+
+| Seçenek | Varsayılan | İşlev |
+| --- | --- | --- |
+| `--region NL / --region AUTO / --region NL,DE` | menü / gözetimsiz kurulumda gerekli (NL) | İki harfli Psiphon ülkesi, AUTO veya virgüllü ülke havuzu. |
+| `--instance N` | 1 | 1–99 arasında örnek seçer. |
+| `--port N` | 40000 + 2 × (N−1) | SOCKS portu 1024–65534; HTTP sonraki porttur. |
+| `--connection socks5\|xray` | socks5 | SOCKS5 adresi veya Xray JSON çıktısını kaydeder. |
+| `--menu / --interactive` | TTY / 0 args | Sihirbazı açar; --instance N eklenebilir. |
+| `--menu-mode easy\|advanced` | easy | Easy veya Advanced tercihini kaydeder. |
+| `--region-pool NL,DE` | boş | Yedek ülke listesi. |
+| `--bind ADDR` | 127.0.0.1 | Loopback veya mevcut özel IPv4 adresine bağlar. |
+| `--bind-loopback` | 127.0.0.1 | 127.0.0.1 bağlamasına döner. |
+| `--http / --no-http` | açık | HTTP yayımını açar/kapatır. |
+| `--gemini-check / --no-gemini-check` | açık | Gemini denetimini açar/kapatır. |
+| `--impersonate / --no-impersonate` | kapalı | Gemini sayfası için tarayıcı TLS profilini açar/kapatır. |
+| `--strict-region / --no-strict-region` | kapalı | Google ülkesinin kesin eşleşmesini açar/kapatır. |
+| `--interval N` | 300 s | Normal denetim aralığı saniye; en az 60. |
+| `--wait N` | 75 s | Hazır olma süresi saniye; en az 20. |
+| `--delay N` | 12 s | Arama denemeleri arası saniye; en az 2. |
+| `--min-speed N` | 800 KiB/s | KiB/s eşiği; 0 hız rotasyonunu kapatır. |
+| `--probe-mb N` | 4 MiB | 0–10 MiB örnek; 0 ve açık eşik durumunda sayfa ölçülür. |
+| `--slow-threshold N` | 2 | Rotasyon öncesi art arda yavaş ölçümler, 2–20. |
+| `--fail-threshold N` | 3 | Kurtarma öncesi art arda hatalar, 2–20. |
+| `--deny-regions 'RU BY IR SY CU KP CN VE'` | RU BY IR SY CU KP CN VE | Yasaklı Google ülkeleri; boş dize listeyi temizler. |
+| `--tunnel-pool N` | 1 | 1 PIN kullanır; 2–32 tek sabit PIN olmadan havuz kullanır. |
+| `--backend auto\|console\|vps-psiphon` | auto | Mevcut backend algılanır/korunur veya açıkça seçilir. |
+| `--help` | — | Kurucu yardımını gösterir. |
+
+</details>
+
+<a id="operations"></a>
+
+## Güncelleme ve İşletim
+
+### Mevcut örneği güncelleme
+
+Güncel kurucuyu yeniden indirip örneğe uygulayın. Verilen seçenekler dışındaki kayıtlı ayarlar korunur. Sadece auto-pin açmak yeni sürüm indirmez.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh -o /tmp/install_psiphon_autopin.sh && bash /tmp/install_psiphon_autopin.sh --instance 1
+```
+
+### Tanılama
+
+Durumu görüntüleyin, yalnızca monitör günlüğünü izleyin ve yapılandırılmış iki proxyyi sınayın:
+
+```bash
+psiphon-autopin status
+journalctl -u psiphon-autopin.service -n 100 --no-pager
+journalctl -u psiphon-autopin.service -f
+systemctl status vps-psiphon.service psiphon-autopin.service --no-pager
 ```
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh | sudo bash -s -- --region DE --port 41000 --interval 1800 --wait 90 --delay 15
+curl -4 -fsS --noproxy '' --proxy socks5h://127.0.0.1:40000 https://api.ipify.org
 ```
-
-## ⚙️ Kurulum seçenekleri
-
-| Seçenek | Varsayılan | Açıklama |
-|---|---|---|
-| `--region DE` | Prompt; `[DE]` | Psiphon sunucusu ülke kodu (iki harf) veya `AUTO`. |
-| `--port 40000` | Prompt; `40000` | Yerel SOCKS5 portu 1024–65534; HTTP bir sonraki portu kullanır. |
-| `--interval 3600` | `3600` | Saniye cinsinden izleme aralığı; en az 60. |
-| `--wait 75` | `75` | Saniye cinsinden bağlantı bekleme süresi; en az 20. |
-| `--delay 12` | `12` | Saniye cinsinden denemeler arası bekleme; en az 2. |
-| `--help` | — | Yardımı göster. |
-
-## 🧰 Yönetici komutları
-
-| Command | Description |
-|---|---|
-| `status` | Kayıtlı sabit çıkışı ve durumu göster |
-| `check` | SOCKS5h ile IP/Google denetimi; çıkış 0=RU değil, 2=RU |
-| `search` | Sunucu ara; önce izleme servisini durdur |
-| `monitor` | Sürekli izleme; normalde systemd çalıştırır |
 
 ```bash
-python3 /opt/psiphon-autopin/psiphon_autopin.py status
-python3 /opt/psiphon-autopin/psiphon_autopin.py check
+curl -4 -fsS --noproxy '' --proxy http://127.0.0.1:40001 https://api.ipify.org
 ```
 
-`--region`, `--port`, `--interval`, `--wait`, `--delay` — Açıklama.
+Bağlantı, IP, ülke, Gemini ve hız denetimleri uzak DNS ile SOCKS üzerinden yapılır; doğrudan bağlantıya geçilmez. Kurucu indirmeleri VPS ağını kullanabilir. WARP otomatik kaldırılmaz.
 
-## 🛠️ Servis ve tanılama
+### Bağımsız örnekler
+
+psiphon-autopin-N veya auto-pin --instance N kullanın. Varsayılan portlar aşağıdadır; --port ile değiştirilebilir. 99 örnek ve 32 tünel sınırları yapılandırma sınırlarıdır, VPS kapasite garantisi değildir.
+
+| # | SOCKS5 | HTTP | CLI |
+| --- | --- | --- | --- |
+| 1 | `40000` | `40001` | `psiphon-autopin` |
+| 2 | `40002` | `40003` | `psiphon-autopin-2` |
+| 3 | `40004` | `40005` | `psiphon-autopin-3` |
+
+### Watchdog ve trafik
+
+Easy madde 5 ve Advanced, dahili monitörün aralığını dakika olarak ayarlar: en az 1, varsayılan 5. Tam saniyeye karşılık gelen 1.5 gibi kesirler kabul edilir. Hata tekrarları daha erken olabilir. İkinci bir Chara watchdog çalışmaz.
+
+Varsayılanlar: Gemini açık, bir tünel, 800 KiB/s, iki yavaş ölçüm, 4 MiB örnek ve kurtarma öncesi üç hata. Beş dakikada bir 4 MiB ölçümü aramalar hariç 30 günde yaklaşık 34 GiB tüketir. --min-speed 0 hız rotasyonunu kapatır; yalnızca --probe-mb 0 sayfa ölçümünü sürdürebilir.
+
+<a id="uninstall"></a>
+
+## Kaldırma
+
+Docker/Go korunarak seçili örneği kaldırma:
 
 ```bash
-journalctl -u psiphon-autopin -f
-journalctl -u psiphon-autopin -n 80 --no-pager
-systemctl status psiphon-autopin --no-pager
-systemctl restart psiphon-autopin
-systemctl stop psiphon-autopin
-systemctl enable --now psiphon-autopin
-docker logs --tail 80 vps-psiphon
-docker ps -a --filter name=vps-psiphon
+psiphon-autopin uninstall
 ```
 
-## 📌 Örnekler
+Örneği ve yalnızca bu yöneticinin kurduğu uygun Docker/Go paketlerini kaldırma:
 
 ```bash
-# Exit IP through Psiphon
-curl -4 -fsS --noproxy '' \
-  --proxy socks5h://127.0.0.1:40000 https://api.ipify.org
-
-# Manual search; monitor must not be running
-systemctl stop psiphon-autopin
-python3 /opt/psiphon-autopin/psiphon_autopin.py search --region PL --port 40000
-systemctl start psiphon-autopin
+psiphon-autopin uninstall --purge-deps
 ```
 
-## 🔄 Nasıl çalışır?
-
-Yönetici Psiphon sunucu listesini BoltDB’den salt okunur biçimde alır, `TargetServerEntry` ile belirli sunucuyu seçer ve çıkış IP’si ile Google ülkesini SOCKS5h üzerinden doğrular. İki kontrolden sonra uygun çıkış kaydedilir.
-
-## ⚠️ Önemli notlar
-
-`--region PL`, `Google=PL` anlamına gelmez; mevcut koşul `Google != RU` şeklindedir. Sunucu IP’si ve çıkış IP’si farklı olabilir. Sunucu değişimi aktif bağlantıları keser.
-
-SOCKS5 ve HTTP yalnızca `127.0.0.1` üzerinde dinler; HTTP portu SOCKS + 1 olur. Kurulum indirmeleri doğrudan VPS bağlantısını kullanır. Root olarak çalıştırmadan önce kodu inceleyin.
-
-## 🩺 Sorun giderme
-
-| Error | Solution |
-|---|---|
-| `containerd.io : Conflicts: containerd` | Docker CE ve docker.io paket çakışması; Docker’ı kontrol etmeden kaldırmayın. |
-| `Config exists but container missing` | Eski yapılandırmayı yedekleyin ve hangi servise ait olduğunu belirleyin. |
-| `SOCKS/HTTP port ... occupied` | `ss -lntp` ile kontrol edin ve farklı `--port` kullanın. |
-| `No known servers in region` | Docker günlüklerini kontrol edin; sunucu listesi henüz dolmamış olabilir. |
-| `Another search/monitor is running` | `search` öncesi izleme servisini durdurun. |
-
-## 📂 Kurulum yolları
-
-```text
-/opt/vps-psiphon/config/psiphon.config
-/opt/psiphon-autopin/psiphon_autopin.py
-/opt/psiphon-autopin/psiphon-server-export
-/opt/psiphon-autopin/ipregion.sh
-/var/lib/psiphon-autopin/settings.json
-/var/lib/psiphon-autopin/state.json
-/etc/systemd/system/psiphon-autopin.service
+```bash
+psiphon-autopin-2 uninstall --purge-deps
 ```
 
-## 📄 Lisans ve teşekkürler
+4.2 sürümünden itibaren her bileşenin kökeni kaydedilir. Önceden kurulu veya kökeni bilinmeyen paketler korunur. Diğer Auto-Pin örnekleri ortak bağımlılıkları; başka çalışan/durmuş konteynerler veya belirsiz kullanım Dockerı korur. APT simülasyonu ilgisiz paketlerin kaldırılmasını engeller.
 
-[GPL-3.0](LICENSE) · [Forcus356](https://github.com/Forcus356) · [Psiphon Tunnel Core](https://github.com/Psiphon-Labs/psiphon-tunnel-core) · [ipregion](https://github.com/Davoyan/ipregion) · [bbolt](https://github.com/etcd-io/bbolt). Independent project; not officially affiliated with Psiphon.
+Kaydı olmayan eski kurulumlar bağımlılıkları korur. Autoremove veya keyfî Docker verisi silme yapılmaz. Python, curl, GCC ve geçiş yedekleri kalır. Menüde 13 ve 14 bu iki kaldırma biçimidir.
+
+Son örneğin normal kaldırılması sahiplik kaydını bırakır ve bağımlılıkları korur. Uygun bağımlılıkların da kaldırılması için kaldırma sırasında `--purge-deps` seçin.
+
+APT temizliği başarısız olursa hata bildirilir ve kayıt korunur. APT düzeltildikten sonra indirilen proje dizininden yeniden deneyin:
+
+```bash
+python3 autopin_system.py cleanup --purge
+```
+
+<a id="faq"></a>
+
+## Sık Sorulan Sorular
+
+<details>
+<summary>PIN doğrulamasını nasıl anlarım?</summary>
+
+INITIAL PIN VERIFIED ve adopted_unpinned: false değerlerini arayın. pin_prepared: true yalnızca hazırlıktır. İlk PIN kontrollü yeniden bağlanır; doğrulama hatasında geri alınır ve sonraki denetimde yeniden denenir.
+
+</details>
+
+<details>
+<summary>INCONCLUSIVE, Gemini çalışıyor demek mi?</summary>
+
+Model yanıtı doğrulanmamıştır. SERVING başarılı anonim denetimdir; INCONCLUSIVE belirsizdir ve tek başına rotasyon başlatmaz. Mevcut politika Gemini belirsizken sunucu PINini doğrulayabilir. Tarayıcı hesabınız sınanmaz.
+
+</details>
+
+<details>
+<summary>ip ve server_ip neden farklı?</summary>
+
+ip genel proxy çıkışı, server_ip Psiphon sunucusudur. Aynı sunucu yeniden bağlanırken farklı çıkış verebilir; sabit IP garantisi yoktur.
+
+</details>
+
+<details>
+<summary>y neden bazen tekrar sorulur?</summary>
+
+Bozuk UTF-8, menüyü kapatmak veya hatalı girişi uygulamak yerine reddedilir. Latin y harfini yeniden yazın, y/n ile onaylayın.
+
+</details>
+
+<details>
+<summary>Google neden başka ülke gösteriyor?</summary>
+
+EgressRegion istenen Psiphon bölgesidir. Google farklı sınıflandırabilir. Yasaklı liste ve strict-region kabulü belirler; ülke veya servis erişimi garanti edilmez.
+
+</details>
+
+<a id="files"></a>
+
+## Dosyalar ve Yapılandırma
+
+Yollar örnek 1 içindir. Diğer örneklerin uygulama, veri ve ayar dizinlerine -N eklenir; sahiplik kaydı ve yedek dizini ortaktır. Bağlantı ve sunucu kayıtları özel ayar verileri içerir.
+
+| Yol | İşlev |
+| --- | --- |
+| `/var/lib/psiphon-autopin/settings.json` | Etkin ayarlar ve menü tercihleri. |
+| `/var/lib/psiphon-autopin/state.json` | Son monitör sonucu ve PIN durumu. |
+| `/opt/vps-psiphon/config/psiphon.config` | Özel Psiphon ayarları ve hedef kaydı. |
+| `/var/lib/psiphon-autopin/server-entry-cache.json` | Özel sunucu kaydı önbelleği. |
+| `/var/lib/psiphon-autopin/connection.json` | Seçili bağlantı çıktısı. |
+| `/var/lib/psiphon-autopin/xray-outbound.json` | Seçilmişse Xray outbound dosyası. |
+| `/var/lib/psiphon-autopin-system/dependencies.json` | Docker/Go sahiplik kaydı, 0600 izinleri. |
+| `/var/backups/psiphon-autopin` | Geçiş ve kurtarma yedekleri. |
+
+<a id="development"></a>
+
+## Geliştirme ve Teşekkürler
+
+Yerel proje kopyasından:
+
+```bash
+python3 -m unittest discover -s tests -v
+bash -n install_psiphon_autopin.sh
+```
+
+[CHANGELOG](CHANGELOG.md) · [tests](tests)
+
+Kullanılan bileşenler: [Psiphon Tunnel Core](https://github.com/Psiphon-Labs/psiphon-tunnel-core), [psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker), [bbolt](https://github.com/etcd-io/bbolt), [curl-impersonate](https://github.com/lexiforest/curl-impersonate).
+
+Lisans [GPL-3.0](LICENSE). İşletim fikirleri [Chara vps-psiphon](https://github.com/Chara-Freedom/vps-psiphon) projesinden incelenmiştir; onun kurucusu/watchdogu burada çalışmaz. README düzeni [3x-ui](https://github.com/MHSanaei/3x-ui) esinlidir.

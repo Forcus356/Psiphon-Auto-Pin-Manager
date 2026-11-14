@@ -1,143 +1,381 @@
-# Forcus Psiphon Auto-Pin Manager 4.2
+<div align="center">
 
-Our Psiphon manager with local SOCKS5, verified server pinning, Google/Gemini checks and automatic recovery. Operational features studied in Chara are implemented in our own Python monitor. There is no Chara installer or second watchdog at runtime.
+<img src="docs/assets/banner.svg" alt="Forcus Auto-Pin — Psiphon Manager" width="100%">
 
-[Полная инструкция на русском](README.ru_RU.md)
+# Forcus Auto-Pin
+
+**Local SOCKS5 · automatic server PIN · Google/Gemini checks · recovery**
+
+![Version](https://img.shields.io/badge/version-4.2.0-32b98b?style=flat-square)
+![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
+
+**English** · [فارسی](README.fa_IR.md) · [العربية](README.ar_EG.md) · [中文](README.zh_CN.md) · [Español](README.es_ES.md) · [Русский](README.ru_RU.md) · [Türkçe](README.tr_TR.md)
+
+</div>
+
+A Psiphon manager for Linux VPS servers. Install it, choose Easy or Advanced, and manage independent proxy instances from the console. Xray can use the same SOCKS5 endpoint through generated outbound JSON.
+
+[Quick Start](#quick-start) · [Features](#features) · [Console Menu](#menu) · [Command Reference](#commands) · [Xray Integration](#xray) · [Update & Operations](#operations) · [Uninstall](#uninstall) · [FAQ](#faq)
+
+<a id="quick-start"></a>
+
+## Quick Start
+
+Run these commands as root in Bash. Supported: Ubuntu/Debian, x86_64, systemd, Internet access and curl. The installer adds missing Docker/Go dependencies and preserves existing installations.
+
+Download and run the installer. With no arguments in a terminal, it opens the setup menu:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh -o /tmp/install_psiphon_autopin.sh && bash /tmp/install_psiphon_autopin.sh
+```
+
+After installation, reopen the menu at any time:
+
+```bash
+auto-pin
+```
+
+**SOCKS5:** `127.0.0.1:40000` → `1080`  ·  **HTTP:** `127.0.0.1:40001` → `8080`
+
+These guides are available in seven languages. The console menu currently uses Russian labels; CLI flags are the same in every guide.
+
+<a id="features"></a>
 
 ## Features
 
-- First healthy single-tunnel connections automatically acquire a cache, apply their server entry and verify the PIN after a controlled reconnect.
-- Optional dependency-aware removal with `uninstall --purge-deps`; preexisting Docker/Go remain installed.
+- Automatic first PIN: creates its own cache, reconnects to the selected server and verifies the connection before marking it pinned.
+- One tunnel for a verified server PIN, or a pool of 2–32 tunnels with sampled checks.
+- Up to 99 independent instances with separate ports, files, datastores, locks and services.
+- Country pools, denied Google countries and optional strict country matching.
+- Optional Gemini availability checks and a browser TLS profile for CAPTCHA detection.
+- Speed thresholds with consecutive-sample confirmation and automatic connection recovery.
+- Local SOCKS5, optional HTTP, private IPv4 binding and Xray outbound JSON.
+- Dependency-aware uninstall that preserves preexisting Docker/Go and other consumers.
 
-- Minimum throughput with consecutive low-speed confirmation; transfer rate excludes time before the first byte.
-- Country pools, persistent rotation and preference for previously verified servers still present in the current datastore.
-- Up to 99 independent instances, each with its own ports, config, datastore, lock and services.
-- Optional browser TLS profile for CAPTCHA detection; a parallel HTTP/2 transfer keeps anonymous Gemini generation active.
-- Denied countries, fast Google-country checks and recovery after transport failures.
-- Local CLI for status, checks, rotation, regions, country pools, speed, service lifecycle, logs and instance uninstall.
-- Optional SOCKS-only publication, private IPv4 binding, Xray outbound output and pools of 2–32 simultaneous tunnels.
-- Original TargetServerEntry selection, diagnostic-ID verification and deferred PIN preparation remain available with one tunnel.
+<a id="menu"></a>
 
-## Interactive setup
+## Console Menu
 
-Use Latin `y` to review/apply, then confirm with `y` / `n`. Malformed UTF-8 input is rejected and reprompted without exiting or accepting a corrupted confirmation.
+**Easy:** country, connection output, Gemini, SOCKS port and watchdog minutes. **Advanced:** all installer settings. Main-menu items 3 and 4 provide operations and instance selection.
 
-Watchdog timing is editable in Easy (item 5) and Advanced, in minutes. Minimum 1 minute, default 5; fractional minutes such as 1.5 are supported when they represent whole seconds. This controls the built-in monitor's regular checks; failure retries remain faster. Existing JSON `interval` and CLI `--interval` retain seconds without rounding old values. The footer shows the saved period and uses bright colors without the faint attribute.
+Enter keeps a value; `-` clears a country list. Latin `y` reviews/applies settings, followed by `y/n` confirmation. Cancel keeps saved settings unchanged. Applying may reconnect the selected tunnel. Easy preserves hidden Advanced values.
 
-Menus use framed sections and a status footer showing the script version, tunnel/monitor state, autostart, saved ports and region, last exit IP, Google/Gemini result and check time. These are saved monitoring results; opening the menu does not run network probes. Unapplied edits are marked separately. The frame adapts to terminal width and wraps long lines. Use `NO_COLOR=1 auto-pin` to disable colors; `TERM=dumb` also selects ASCII borders.
+The footer shows saved monitor results; opening the menu does not perform a fresh network check. Use `check` for that. `NO_COLOR=1 auto-pin` disables color; `TERM=dumb auto-pin` uses ASCII borders.
 
-Run the installer without arguments in a terminal:
+<details>
+<summary>Menu preview</summary>
+
+Illustrative output from the current menu renderer; the addresses and status below are demonstration data.
+
+![Menu preview](docs/assets/menu-preview.png)
+
+[Menu preview (.txt)](docs/assets/menu-demo.txt)
+
+</details>
+
+<a id="examples"></a>
+
+## Installation Examples
+
+Each example downloads and runs the installer without the menu. Explicit flags override saved values; omitted settings are retained on updates.
+
+<details>
+<summary>Installation Examples</summary>
+
+### Without Gemini
 
 ```bash
-sudo bash install_psiphon_autopin.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --no-gemini-check
 ```
 
-Choose **Easy Mode** for country, SOCKS5 address / Xray JSON, Gemini checks, the SOCKS port and watchdog interval in minutes. **Advanced Mode** exposes all installer settings. The main menu also selects an instance (1–99) and provides status, checks, lifecycle, rotation/search, logs, speed, PIN/cache tools and scoped uninstall.
-
-Edit numbered fields, then choose `y` to review and apply. Enter keeps a field; `-` clears a country list. Application requires confirmation and may restart the selected tunnel. Cancel leaves files/services unchanged. Easy preserves existing Advanced values.
-
-Reopen it with `sudo auto-pin`, `sudo auto-pin --instance 2`, or `sudo psiphon-autopin-2 menu`. Effective settings, output format and last menu mode persist in the instance's `settings.json`. `connection.json` contains the selected connection; Xray output also produces `xray-outbound.json` (mode 0600). Add that outbound and routing to Xray yourself; its process must reach the SOCKS address.
-
-Ordinary flags bypass the menu for automation. `--menu` / `--interactive` explicitly opens the wizard and accepts optional `--instance N`. An executable installer copy is saved locally so reopening does not need a fresh installer download; applying settings may still download missing packages, images or browser profiles.
-
-## Install
-
-Ubuntu/Debian x86_64, root and systemd. Run the new release file locally, or the repository installer after publishing this version:
+### Country pool and speed floor
 
 ```bash
-sudo bash install_psiphon_autopin.sh --region NL,DE --port 40000
-sudo bash install_psiphon_autopin.sh --instance 2 --region DE
-sudo bash install_psiphon_autopin.sh --impersonate --no-http
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL,DE,PL --min-speed 1000
 ```
 
-Instance 1 uses SOCKS `127.0.0.1:40000 → 1080` inside Docker and HTTP `40001 → 8080`. Instance 2 defaults to ports 40002/40003. The address defaults to loopback; `--bind` accepts an existing private IPv4 address for bridge-container access. Public bindings are rejected.
+### Second independent instance
 
-Fresh-install defaults: one tunnel, 300-second checks, Gemini enabled, 800 KiB/s floor, two consecutive slow samples and a 4 MiB throughput sample. Existing saved options are retained unless overridden. `--min-speed 0` disables speed-based rotation. At `--probe-mb 0` an enabled speed floor measures a page instead of an extra download. A 4 MiB sample every five minutes costs roughly 34 GiB/month before search traffic.
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --instance 2 --region DE --port 40002
+```
 
-## Commands
+### Publish SOCKS5 only
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --no-http
+```
+
+### Generate an Xray connection file
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --connection xray
+```
+
+### Three tunnels and a 10-minute watchdog
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --tunnel-pool 3 --interval 600
+```
+
+### Gemini with a browser TLS profile
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh) --region NL --gemini-check --impersonate
+```
+
+</details>
+
+<a id="commands"></a>
+
+## Command Reference
+
+| Command | Purpose |
+| --- | --- |
+| `auto-pin` | Open the setup/operations menu. |
+| `auto-pin --instance 2` | Open the menu for instance 2. |
+| `psiphon-autopin status` | Show saved configuration and last result. |
+| `psiphon-autopin check` | Run a fresh connection/policy check. |
+| `psiphon-autopin rotate` | Request server rotation. |
+| `psiphon-autopin region NL` | Switch to NL and clear the old country pool. |
+| `psiphon-autopin pool NL,DE,PL` | Set a fallback country pool. |
+| `psiphon-autopin pool ''` | Clear the country pool. |
+| `psiphon-autopin speed` | Measure throughput through Psiphon. |
+| `psiphon-autopin logs 100` | Show recent monitor and tunnel logs. |
+| `psiphon-autopin start` | Start the selected instance. |
+| `psiphon-autopin stop` | Stop the selected instance. |
+| `psiphon-autopin restart` | Restart the selected instance. |
+| `psiphon-autopin xray` | Print SOCKS outbound JSON for Xray. |
+| `psiphon-autopin-2 status` | Show instance 2 status. |
+| `psiphon-autopin menu` | Open the menu through the original CLI. |
+| `vps-psiphon status` | Compatibility alias for the same manager. |
+| `psiphon-autopin refresh-cache --allow-interruption` | Refresh the datastore cache; interrupts the tunnel. |
+| `psiphon-autopin prepare-pin` | Stage a PIN for a future restart. |
+| `psiphon-autopin search` | Search for a suitable server. |
+| `psiphon-autopin monitor` | Internal monitor entry point; normally started by systemd. |
+
+`set-region --region NL` and `set-pool --region-pool NL,DE` are the long-form aliases of `region NL` and `pool NL,DE`. Runtime flags can override policy for a command; use the menu/installer to persist the full service configuration.
+
+```bash
+psiphon-autopin set-region --region NL
+psiphon-autopin set-pool --region-pool NL,DE
+```
+
+`check` exit codes: **0** accepted observation, **2** policy rejection (including low speed), **1** probe/runtime error. An accepted observation can still have Gemini `INCONCLUSIVE`.
+
+<a id="xray"></a>
+
+## Xray Integration
+
+The path is **Xray → SOCKS5 → Psiphon → Internet**. `xray` prints an outbound; `--connection xray` also saves `xray-outbound.json`. Add the outbound and routing to your Xray configuration yourself. It is the same SOCKS5 endpoint, not a separate transport.
+
+```bash
+psiphon-autopin xray
+```
+
+```json
+{
+  "tag": "psiphon-out",
+  "protocol": "socks",
+  "settings": {
+    "servers": [{"address": "127.0.0.1", "port": 40000}]
+  }
+}
+```
+
+For Xray in a Docker bridge network, 127.0.0.1 refers to the Xray container. Use host networking or an existing private IPv4 of the VPS via `--bind`. Public binding is rejected. The proxy is intended for TCP.
+
+<a id="options"></a>
+
+## Installer Options
+
+The menu edits watchdog timing in minutes. CLI `--interval` and JSON `interval` always use seconds. Port/region examples are values to replace with your own.
+
+New installations with `auto` use `vps-psiphon`; existing recognized backends are preserved. `console` requires loopback binding. Setting `--no-gemini-check` leaves country, speed and recovery checks enabled.
+
+<details>
+<summary>Installer Options</summary>
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--region NL / --region AUTO / --region NL,DE` | menu / required for unattended install (NL) | Two-letter Psiphon country, AUTO, or a comma-separated country pool. |
+| `--instance N` | 1 | Select instance 1–99. |
+| `--port N` | 40000 + 2 × (N−1) | SOCKS port 1024–65534; HTTP uses the next port. |
+| `--connection socks5\|xray` | socks5 | Persist SOCKS5 address or Xray JSON output. |
+| `--menu / --interactive` | TTY / 0 args | Explicitly open the wizard; optional --instance N. |
+| `--menu-mode easy\|advanced` | easy | Remember Easy or Advanced mode. |
+| `--region-pool NL,DE` | empty | Fallback country list. |
+| `--bind ADDR` | 127.0.0.1 | Bind to loopback or an existing private IPv4. |
+| `--bind-loopback` | 127.0.0.1 | Restore binding to 127.0.0.1. |
+| `--http / --no-http` | on | Enable/disable HTTP publication. |
+| `--gemini-check / --no-gemini-check` | on | Enable/disable the Gemini probe. |
+| `--impersonate / --no-impersonate` | off | Enable/disable browser TLS for Gemini page checks. |
+| `--strict-region / --no-strict-region` | off | Enable/disable strict Google-country matching. |
+| `--interval N` | 300 s | Normal check interval in seconds; minimum 60. |
+| `--wait N` | 75 s | Readiness deadline in seconds; minimum 20. |
+| `--delay N` | 12 s | Search-attempt delay in seconds; minimum 2. |
+| `--min-speed N` | 800 KiB/s | KiB/s floor; 0 disables speed-based rotation. |
+| `--probe-mb N` | 4 MiB | Probe size 0–10 MiB; at 0 an enabled floor measures a page. |
+| `--slow-threshold N` | 2 | Consecutive slow samples before rotation, 2–20. |
+| `--fail-threshold N` | 3 | Consecutive failures before recovery, 2–20. |
+| `--deny-regions 'RU BY IR SY CU KP CN VE'` | RU BY IR SY CU KP CN VE | Denied Google countries; an empty string clears the list. |
+| `--tunnel-pool N` | 1 | 1 enables PIN; 2–32 uses a pool without one fixed PIN. |
+| `--backend auto\|console\|vps-psiphon` | auto | Preserve/detect an existing backend, or choose one explicitly. |
+| `--help` | — | Print installer help. |
+
+</details>
+
+<a id="operations"></a>
+
+## Update & Operations
+
+### Update an existing instance
+
+Download the latest installer again and apply it to the instance. Existing settings are retained unless flags override them. Opening auto-pin alone does not download a new version.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh -o /tmp/install_psiphon_autopin.sh && bash /tmp/install_psiphon_autopin.sh --instance 1
+```
+
+### Diagnostics
+
+Check saved state, follow monitor-only logs, and test both configured proxies:
 
 ```bash
 psiphon-autopin status
-psiphon-autopin check
-psiphon-autopin rotate
-psiphon-autopin region NL
-psiphon-autopin pool NL,DE,PL
-psiphon-autopin pool ''
-psiphon-autopin speed
-psiphon-autopin logs 80
-psiphon-autopin stop
-psiphon-autopin start
-psiphon-autopin restart
-psiphon-autopin xray
-psiphon-autopin-2 uninstall
+journalctl -u psiphon-autopin.service -n 100 --no-pager
+journalctl -u psiphon-autopin.service -f
+systemctl status vps-psiphon.service psiphon-autopin.service --no-pager
 ```
-
-Use `psiphon-autopin-N` for instance N. The `vps-psiphon[-N]` aliases invoke the same manager. `uninstall` removes only that instance, retaining migration backups under `/var/backups/psiphon-autopin` and images referenced by other containers.
-
-`check` returns 0 for an accepted observation, 2 for a refusal/denied country/low speed/strict-region mismatch, and 1 for a probe error. Gemini `INCONCLUSIVE` is neither a successful model reply nor a rotation reason by itself. `SERVING` describes the anonymous probe, not an authenticated browser account.
-
-Technical commands are still supported:
 
 ```bash
-psiphon-autopin refresh-cache --allow-interruption
-psiphon-autopin prepare-pin
-psiphon-autopin search
+curl -4 -fsS --noproxy '' --proxy socks5h://127.0.0.1:40000 https://api.ipify.org
 ```
-
-Cache refresh interrupts the connection. A prepared pin is only promoted after a new container start confirms the IP and diagnostic ID. Ctrl+C stops a long search and resumes a previously active monitor.
-
-## Options
-
-| Flag | Meaning |
-|---|---|
-| `--region NL` / `--region NL,DE` | Country or pool; AUTO removes the restriction |
-| `--region-pool NL,DE` | Explicit country pool |
-| `--menu` / `--interactive` | Open the terminal wizard; optional `--instance N` |
-| `--connection socks5\|xray` | Persist the connection output format |
-| `--menu-mode easy\|advanced` | Persist the menu mode |
-| `--instance N` | Independent instance 1–99 |
-| `--port N` | Host SOCKS port; HTTP uses port+1 |
-| `--bind ADDR` / `--bind-loopback` | Private IPv4 address / default 127.0.0.1 |
-| `--no-http` / `--http` | Disable / enable HTTP publication |
-| `--interval N`, `--wait N`, `--delay N` | Check period, readiness deadline and attempt delay |
-| `--probe-mb N` | 0–10 MiB per throughput sample |
-| `--min-speed N` | KiB/s floor; 0 disables it |
-| `--slow-threshold N` | 2–20 consecutive slow samples |
-| `--fail-threshold N` | 2–20 failures before recovery |
-| `--deny-regions 'CC CC ...'` | Default RU BY IR SY CU KP CN VE; an empty string disables |
-| `--gemini-check` / `--no-gemini-check` | Enable / disable Gemini probe |
-| `--impersonate` / `--no-impersonate` | Browser TLS for CAPTCHA checks |
-| `--strict-region` | Require Google country to match the requested country |
-| `--tunnel-pool N` | 1 uses PIN; 2–32 samples multiple tunnels without a single-IP PIN claim |
-| `--backend auto\|console\|vps-psiphon` | Preserve/detect an existing backend or select one |
-
-Xray running in a bridge container cannot reach host loopback. Use host networking or an existing private host IPv4 via `--bind`; `xray` prints outbound JSON without changing your panel. The proxy is TCP-oriented.
-
-IP, country, Gemini and throughput checks use SOCKS with remote DNS and no direct fallback. Installation downloads may use the VPS connection. Unknown classifications remain unknown. Switching servers can interrupt sessions, and neither a country, an unchanged exit IP nor service access is guaranteed. WARP is not removed automatically.
-
-## Initial PIN and dependency-aware uninstall
-
-Single-tunnel mode now creates its missing cache automatically. The datastore is exported only while Psiphon is stopped; the current server's unique entry is applied before startup. A new container start, matching diagnostic ID, stable exit and current policies are verified before reporting `INITIAL PIN VERIFIED`. Failure restores the original target/state and reconnects; retries are bounded by the normal check period. Verified targets and multi-tunnel pools are not repeatedly re-pinned. Manual `prepare-pin` stays deferred.
-
-A server may provide a different public exit IP after reconnecting; the recorded state reflects the verified new connection. Gemini `INCONCLUSIVE` is allowed by the existing policy and remains explicitly inconclusive even when the server PIN is verified.
 
 ```bash
-sudo psiphon-autopin uninstall                 # instance only
-sudo psiphon-autopin uninstall --purge-deps    # instance + eligible owned Docker/Go
-sudo psiphon-autopin-2 uninstall --purge-deps  # selected instance
+curl -4 -fsS --noproxy '' --proxy http://127.0.0.1:40001 https://api.ipify.org
 ```
 
-The operational menu includes the latter as item 14. A private receipt at `/var/lib/psiphon-autopin-system/dependencies.json` records packages first installed by Auto-Pin 4.2. Ownership is tracked per component. Preexisting or unknown-origin dependencies are retained, including legacy installations without receipts. Other Auto-Pin instances retain both components; other running/stopped containers or unknown Docker usage retain Docker. APT simulation blocks removal of packages outside the receipt. Installation and cleanup share a process lock.
+Connectivity, IP, country, Gemini and speed checks use SOCKS with remote DNS and no direct fallback. Installer downloads can use the VPS connection. WARP is not removed automatically.
 
-No autoremove, arbitrary Docker-data deletion or manual `/usr/local/go` deletion is performed. Python, curl, GCC and unrelated tools are kept. Plain uninstall relinquishes ownership when the final instance is removed and leaves dependencies installed. Migration backups remain. If package removal fails, the command reports an error and keeps the receipt; retry from downloaded sources with `sudo python3 autopin_system.py cleanup --purge` after fixing APT.
+### Independent instances
 
-## Checks and attribution
+Use psiphon-autopin-N or auto-pin --instance N. Default host ports are shown below; --port can override them. The 99-instance and 32-tunnel limits are configuration bounds, not a capacity guarantee for your VPS.
+
+| # | SOCKS5 | HTTP | CLI |
+| --- | --- | --- | --- |
+| 1 | `40000` | `40001` | `psiphon-autopin` |
+| 2 | `40002` | `40003` | `psiphon-autopin-2` |
+| 3 | `40004` | `40005` | `psiphon-autopin-3` |
+
+### Watchdog and traffic
+
+Easy item 5 and Advanced edit the built-in monitor interval in minutes: minimum 1, default 5. Fractional minutes such as 1.5 are accepted when they represent whole seconds. Failure retries may happen sooner. There is no second Chara watchdog.
+
+Default policy: Gemini on, one tunnel, 800 KiB/s floor, two slow samples, a 4 MiB probe and three failures before recovery. A 4 MiB probe every five minutes uses about 34 GiB per 30 days before search traffic. --min-speed 0 disables speed rotation; --probe-mb 0 alone can still measure a page.
+
+<a id="uninstall"></a>
+
+## Uninstall
+
+Remove the selected instance while keeping Docker/Go:
+
+```bash
+psiphon-autopin uninstall
+```
+
+Remove the instance and eligible Docker/Go packages installed by this manager:
+
+```bash
+psiphon-autopin uninstall --purge-deps
+```
+
+```bash
+psiphon-autopin-2 uninstall --purge-deps
+```
+
+Ownership is recorded per component from version 4.2. Preexisting or unknown-origin packages remain installed. Other Auto-Pin instances retain shared dependencies; other running/stopped containers or unknown Docker usage retain Docker. APT simulation blocks removal of unrelated packages.
+
+Legacy installations without an ownership receipt keep dependencies. No autoremove or arbitrary Docker-data deletion is used. Python, curl, GCC and migration backups remain. Menu items 13 and 14 provide the two removal modes.
+
+Plain uninstall releases the ownership receipt after removing the last instance and leaves dependencies installed. Choose `--purge-deps` during removal if you want eligible owned dependencies removed.
+
+If APT cleanup fails, the command reports failure and retains its receipt. After fixing APT, retry from the downloaded project directory:
+
+```bash
+python3 autopin_system.py cleanup --purge
+```
+
+<a id="faq"></a>
+
+## FAQ
+
+<details>
+<summary>How do I know the PIN is verified?</summary>
+
+Look for INITIAL PIN VERIFIED and adopted_unpinned: false. pin_prepared: true means staged, not yet verified. First PIN creation makes a controlled reconnect; failed verification rolls back and retries on a later health cycle.
+
+</details>
+
+<details>
+<summary>Does INCONCLUSIVE mean Gemini works?</summary>
+
+No model reply was confirmed. SERVING is an anonymous successful probe; INCONCLUSIVE is unresolved and does not trigger rotation by itself. The current policy can verify a server PIN while Gemini stays inconclusive. Your logged-in browser account is not tested.
+
+</details>
+
+<details>
+<summary>Why do ip and server_ip differ?</summary>
+
+ip is the public proxy exit; server_ip is the Psiphon server address. A pinned server can also change its public exit after reconnecting, so an unchanged IP is not guaranteed.
+
+</details>
+
+<details>
+<summary>Why does y sometimes ask again?</summary>
+
+Malformed UTF-8 input is rejected instead of applying corrupted input or closing the menu. Retype a Latin y; confirm with y/n.
+
+</details>
+
+<details>
+<summary>Why is the requested country different from Google?</summary>
+
+Psiphon EgressRegion is a requested region. Google can classify the exit differently. The deny list and optional strict-region setting control acceptance. No country or service access is guaranteed.
+
+</details>
+
+<a id="files"></a>
+
+## Files & Configuration
+
+Paths below are for instance 1. Other instances add -N to instance app/data/config directories; the ownership receipt and backup directory are shared. Connection and server-entry files contain private configuration data.
+
+| Path | Purpose |
+| --- | --- |
+| `/var/lib/psiphon-autopin/settings.json` | Effective settings and menu preferences. |
+| `/var/lib/psiphon-autopin/state.json` | Last monitoring result and PIN state. |
+| `/opt/vps-psiphon/config/psiphon.config` | Private Psiphon configuration and target entry. |
+| `/var/lib/psiphon-autopin/server-entry-cache.json` | Private server-entry cache. |
+| `/var/lib/psiphon-autopin/connection.json` | Selected connection output. |
+| `/var/lib/psiphon-autopin/xray-outbound.json` | Xray outbound, when that format is selected. |
+| `/var/lib/psiphon-autopin-system/dependencies.json` | Docker/Go ownership receipt, mode 0600. |
+| `/var/backups/psiphon-autopin` | Migration and recovery backups. |
+
+<a id="development"></a>
+
+## Development & Credits
+
+From a local project checkout:
 
 ```bash
 python3 -m unittest discover -s tests -v
 bash -n install_psiphon_autopin.sh
 ```
 
-Tests enforce that the standalone manager/probe match their embedded installer copies. The installer remains a standalone curl-to-bash file.
+[CHANGELOG](CHANGELOG.md) · [tests](tests)
 
-Uses [Psiphon Tunnel Core](https://github.com/Psiphon-Labs/psiphon-tunnel-core), [psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker), [bbolt](https://github.com/etcd-io/bbolt) and optionally [curl-impersonate](https://github.com/lexiforest/curl-impersonate). Operational approaches were studied in [Chara-Freedom/vps-psiphon](https://github.com/Chara-Freedom/vps-psiphon); its installer/watchdog is not used. [GPL-3.0](LICENSE).
+Built with: [Psiphon Tunnel Core](https://github.com/Psiphon-Labs/psiphon-tunnel-core), [psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker), [bbolt](https://github.com/etcd-io/bbolt), [curl-impersonate](https://github.com/lexiforest/curl-impersonate).
+
+License: [GPL-3.0](LICENSE). Operational ideas were studied in [Chara vps-psiphon](https://github.com/Chara-Freedom/vps-psiphon); its installer and watchdog are not part of our runtime. README organization is inspired by [3x-ui](https://github.com/MHSanaei/3x-ui).
