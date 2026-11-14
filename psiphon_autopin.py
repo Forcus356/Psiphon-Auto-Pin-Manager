@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v3.5.1: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v4.0.0: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import datetime as dt
 import fcntl
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -23,13 +24,68 @@ CONTAINER='vps-psiphon'
 PROXY='127.0.0.1:40000'  # Updated from settings / --port in main()
 STATE=DATA/'state.json'
 ENV_FILE=Path('/etc/default/vps-psiphon')
+INSTANCE=1
+POLICY={}
+
+def configure_instance(number):
+    global INSTANCE,BASE,DATA,CONFIG,CONTAINER,STATE,CACHE,ENV_FILE,PROXY
+    if not 1<=number<=99:raise ValueError('instance must be 1..99')
+    INSTANCE=number
+    suffix='' if number==1 else f'-{number}'
+    BASE=Path('/opt/psiphon-autopin'+suffix)
+    DATA=Path('/var/lib/psiphon-autopin'+suffix)
+    CONTAINER='vps-psiphon'+suffix
+    CONFIG=Path('/opt')/CONTAINER/'config/psiphon.config'
+    STATE=DATA/'state.json';CACHE=DATA/'server-entry-cache.json'
+    ENV_FILE=Path('/etc/default')/CONTAINER
+    PROXY=f'127.0.0.1:{40000+2*(number-1)}'
+
+def monitor_unit():
+    return 'psiphon-autopin'+('' if INSTANCE==1 else f'-{INSTANCE}')+'.service'
+
+def countries(value):
+    rows=value.replace(',',' ').upper().split() if isinstance(value,str) else list(value or [])
+    if any(not re.fullmatch('[A-Z]{2}',x) for x in rows):raise ValueError('countries must be two-letter codes')
+    return list(dict.fromkeys(rows))
+
+def speed_reason(speed):
+    floor=float(POLICY.get('min_speed_kib',0))
+    return f'Slow exit: {speed:.1f} < {floor:.1f} KiB/s' if floor and speed is not None and speed<floor else ''
+
+def save_region(region):
+    update_region_env(region)
+    clear_target(region)
+    cfg=read_json(DATA/'settings.json',{}) or {};cfg['region']=region
+    atomic_json(DATA/'settings.json',cfg)
+    STATE.unlink(missing_ok=True)
+
+def rotation_regions(region):
+    pool=countries(POLICY.get('region_pool',[]))
+    if len(pool)<2:return [region]
+    if region in pool:
+        i=pool.index(region)+1;return pool[i:]+pool[:i]
+    return pool
+
+def remember_pin(candidate,region):
+    path=DATA/'verified-reserve.json'
+    data=read_json(path,{}) or {}
+    rows=[x for x in data.get(region,[]) if x.get('diagnostic')!=candidate['diagnostic']]
+    data[region]=[candidate,*rows][:8]
+    atomic_json(path,data)
+
+def prioritized_candidates(rows,region):
+    saved=(read_json(DATA/'verified-reserve.json',{}) or {}).get(region,[])
+    # Only fresh DB entries are used; the reserve changes ordering, never invents credentials.
+    rank={x.get('diagnostic'):i for i,x in enumerate(saved)}
+    random.shuffle(rows)
+    return sorted(rows,key=lambda x:rank.get(x['diagnostic'],1000))
 
 def log(message):
     print(dt.datetime.now().astimezone().isoformat(timespec='seconds'),message,flush=True)
 
-def run(args, timeout=60, merge=False):
+def run(args, timeout=60, merge=False, accepted_codes=(0,)):
     p=subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT if merge else subprocess.PIPE,text=True,timeout=timeout)
-    if p.returncode:
+    if p.returncode not in accepted_codes:
         error=p.stdout if merge else p.stderr
         raise RuntimeError(f'{args[0]} rc={p.returncode}: {(error or "")[-450:]}')
     return p.stdout
@@ -66,7 +122,7 @@ def tunnel_action(action):
     # A --rm container owned by systemd cannot be stopped/restarted via Docker:
     # systemd would race discovery and reopen BoltDB while the exporter reads it.
     if backend()=='vps-psiphon':
-        return run(['systemctl',action,'vps-psiphon.service'],timeout=120)
+        return run(['systemctl',action,CONTAINER+'.service'],timeout=120)
     return run(['docker',action,CONTAINER],timeout=90)
 
 def update_region_env(region):
@@ -86,7 +142,7 @@ def update_region_env(region):
     finally:
         if name and os.path.exists(name):os.unlink(name)
 
-def set_region(region,wait):
+def set_region(region,wait,clear_pool=False):
     """Persist region, discard the old target and reconnect under the writer lock."""
     settings=read_json(DATA/'settings.json',{}) or {}
     config=read_json(CONFIG)
@@ -97,6 +153,8 @@ def set_region(region,wait):
                 for line in ENV_FILE.read_text().splitlines() if line.startswith('EGRESS_REGION=')]
         env_matches=(values==[[region]] if region else values==[[]] or values==[['']])
     if env_matches and settings.get('region','')==region and config.get('EgressRegion','')==region:
+        if clear_pool:
+            settings['region_pool']=[];atomic_json(DATA/'settings.json',settings);POLICY['region_pool']=[]
         log(f'Region already {region or "AUTO"}; tunnel unchanged')
         return
     stamp=dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S-%f')
@@ -107,8 +165,9 @@ def set_region(region,wait):
     if backend()=='vps-psiphon':
         shutil.copy2(ENV_FILE,backup/'vps-psiphon')
     update_region_env(region)
-    change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':1})
+    change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':int(POLICY.get('tunnel_pool',1))})
     settings['region']=region
+    if clear_pool:settings['region_pool']=[];POLICY['region_pool']=[]
     atomic_json(DATA/'settings.json',settings)
     STATE.unlink(missing_ok=True);CACHE.unlink(missing_ok=True)
     log(f'Region saved: {region or "AUTO"}; backup={backup}; reconnecting')
@@ -122,6 +181,13 @@ def socks_ip():
     return ip
 
 def google_region():
+    try:
+        page=run(['curl','-4','-fsS','--max-time','25','--noproxy','','--proxy',f'socks5h://{PROXY}',
+                  '-H','Accept-Language: en-US','https://www.youtube.com/'],timeout=30)
+        found=re.search(r'"GL"\s*:\s*"([A-Z]{2})"',page)
+        if found:return found.group(1)
+    except Exception as exc:log('Fast Google classifier unavailable: '+str(exc))
+    if not POLICY.get('legacy_geo_fallback',False):raise RuntimeError('Google country UNKNOWN')
     script=BASE/'ipregion.sh'
     if not script.is_file():raise RuntimeError('ipregion missing')
     env=os.environ.copy()
@@ -147,34 +213,41 @@ def gemini_verdict(enabled):
     """Report only explicit refusal; never treat inconclusive as bad exit."""
     if not enabled:return 'DISABLED'
     port=PROXY.rsplit(':',1)[1]
-    p=subprocess.run(['python3',str(BASE/'gemini_probe.py'),'--port',port],
-                     stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=130)
-    label={0:'SERVING',1:'REFUSED',2:'INCONCLUSIVE'}.get(p.returncode,'INCONCLUSIVE')
+    cmd=['python3',str(BASE/'gemini_probe.py'),'--port',port,'--host',PROXY.rsplit(':',1)[0]]
+    if POLICY.get('impersonate'):
+        cmd+=['--impersonate-dir',str(BASE/'curl-impersonate')]
+    p=subprocess.run(cmd,
+                     stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=185)
+    label={0:'SERVING',1:'REFUSED',2:'INCONCLUSIVE',3:'CAPTCHA'}.get(p.returncode,'INCONCLUSIVE')
     log('Gemini '+label+': '+(p.stdout or p.stderr).strip()[-180:])
     return label
 
 def speed_probe(mb):
-    """Optional single-download measurement. Never used as the sole rotation reason."""
-    if mb<=0:return None
-    url=f'https://speed.cloudflare.com/__down?bytes={mb*1048576}'
+    """Measure after the first byte, so connection setup is not mistaken for poor throughput."""
+    if mb<=0 and not POLICY.get('min_speed_kib'):return None
+    url=f'https://speed.cloudflare.com/__down?bytes={mb*1048576}' if mb else 'https://www.youtube.com/'
     cmd=['curl','-4','-fsS','--noproxy','','--proxy',f'socks5h://{PROXY}',
          '--connect-timeout','8','--max-time','50','-o','/dev/null',
-         '-w','%{speed_download}',url]
-    out=run(cmd,timeout=55).strip()
-    kbps=round(float(out)/1024,1)
-    log(f'Speed probe: {kbps} KiB/s, sample={mb} MiB')
-    return kbps
+         '-w','%{size_download} %{time_starttransfer} %{time_total} %{http_code}',url]
+    size,first,total,code=run(cmd,timeout=55,accepted_codes=(0,28)).strip().split()
+    elapsed=float(total)-float(first)
+    if int(code) not in (200,206) or float(size)<50000 or elapsed<=0:raise RuntimeError('Insufficient throughput sample')
+    speed=round(float(size)/elapsed/1024,1)
+    log(f'Speed probe: {speed} KiB/s after first byte, sample={mb} MiB')
+    return speed
 
 def evaluate_exit(region, gemini, mb, strict=False):
     ip,geo=probe()
     verdict=gemini_verdict(gemini)
     speed=None
-    if mb:
+    if mb or POLICY.get('min_speed_kib'):
         try:speed=speed_probe(mb)
         except Exception as exc:log('Optional speed sample failed: '+str(exc))
     # Google classifications can differ from the server's requested country.
     # In strict mode reject *confirmed* mismatch, not an inconclusive Gemini reply.
-    reason=('Google=RU' if geo=='RU' else 'Gemini REFUSED' if verdict=='REFUSED' else
+    denied=POLICY.get('deny_regions',['RU'])
+    reason=(f'Google={geo}' if geo in denied else 'Gemini REFUSED' if verdict=='REFUSED' else
+            'Gemini CAPTCHA' if verdict=='CAPTCHA' else
             f'Google={geo} != requested {region}' if strict and region and geo!=region else '')
     return ip,geo,verdict,speed,reason
 
@@ -182,9 +255,13 @@ def adopt_current(region,gemini,mb,strict,observed=None):
     """Keep a healthy tunnel; recover an existing target only against the cached DB entry."""
     config=read_json(CONFIG,{}) or {}
     ip,geo,verdict,speed,reason = observed if observed is not None else evaluate_exit(region,gemini,mb,strict)
-    if reason:return False
+    if reason or speed_reason(speed):return False
     diag=connected_id()
     if config.get('TargetServerEntry'):
+        staged=read_json(STATE,{}) or {}
+        if staged.get('pin_prepared') and started_at()==staged.get('prepared_container_started_at'):
+            log('Prepared target still pending a new container start; preserving unverified state')
+            return True
         # Search can be interrupted after writing a target but before saving its state.
         # Require both the cached credential blob and the live diagnostic ID to match.
         row=candidate_for_connected_server(diag,region)
@@ -197,6 +274,7 @@ def adopt_current(region,gemini,mb,strict,observed=None):
             'diagnostic_id':diag,'server_ip':row['server_ip'],'gemini':verdict,
             'speed_kib_s':speed,'adopted_unpinned':False,
             'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+        remember_pin(row,region)
         log(f'RECOVERED VERIFIED PIN: exit={ip} Google={geo} Gemini={verdict} '
             f'server={row["server_ip"]} ID={diag}; no restart')
         return True
@@ -317,7 +395,7 @@ def apply_candidate(candidate,region):
 
 def clear_target(region):
     update_region_env(region)
-    change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':1,'EmitDiagnosticNotices':True,'DisableReplay':True})
+    change_config({'EgressRegion':region,'TargetServerEntry':'','TunnelPoolSize':int(POLICY.get('tunnel_pool',1)),'EmitDiagnosticNotices':True,'DisableReplay':True})
 
 def verify_pin_current(region,gemini=False,mb=0,strict=False):
     state=read_json(STATE,{}) or {}
@@ -327,7 +405,7 @@ def verify_pin_current(region,gemini=False,mb=0,strict=False):
         return False
     ip,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
     diag=connected_id()
-    if ip==state['ip'] and not reason and diag==state.get('diagnostic_id'):
+    if ip==state['ip'] and not reason and not speed_reason(speed) and diag==state.get('diagnostic_id'):
         log(f'Existing pin healthy: {ip}, {geo}, server={diag}')
         return True
     return False
@@ -349,7 +427,12 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
     STATE.unlink(missing_ok=True)
     seen_exits=set()
     cycle=0
+    pool=rotation_regions(region)
     while True:
+        next_region=pool[cycle % len(pool)]
+        if next_region!=region:
+            region=next_region;save_region(region)
+            log(f'Region pool advanced to {region}')
         cycle+=1
         try:
             # Give Psiphon an opportunity to discover new servers before snapshotting the DB.
@@ -360,7 +443,7 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
             log(f'Cannot collect candidates: {exc}; retry in 30s')
             time.sleep(30)
             continue
-        random.shuffle(candidates)
+        candidates=prioritized_candidates(candidates,region)
         log(f'Cycle {cycle}: {len(candidates)} unique server IPs')
         for i,candidate in enumerate(candidates,1):
             server=candidate['server_ip'];expected=candidate['diagnostic']
@@ -377,6 +460,7 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
                     continue
                 first,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
                 if first!=exit_ip:raise RuntimeError(f'Exit IP changed: {exit_ip} -> {first}')
+                reason=reason or speed_reason(speed)
                 if reason:
                     seen_exits.add(first)
                     log(f'Rejected exit {first}: {reason}')
@@ -384,11 +468,12 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
                 # Recheck IP/geo, without an unnecessary second Gemini request.
                 time.sleep(5)
                 second,geo2=probe()
-                if second!=first or geo2=='RU' or (strict and region and geo2!=region) or connected_id()!=expected:
+                if second!=first or geo2 in POLICY.get('deny_regions',['RU']) or (strict and region and geo2!=region) or connected_id()!=expected:
                     raise RuntimeError(f'Pin verification unstable: {second} Google={geo2}')
                 atomic_json(STATE,{'ip':first,'google_region':geo2,'region':region,'diagnostic_id':expected,
                                    'server_ip':server,'gemini':verdict,'speed_kib_s':speed,
                                    'adopted_unpinned':False,'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+                remember_pin(candidate,region)
                 log(f'PIN VERIFIED: exit={first} Google={geo2} Gemini={verdict} server={server} ID={expected}')
                 return True
             except Exception as exc:
@@ -403,19 +488,32 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
         seen_exits.clear()
 
 def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
-    log(f'Monitor v3.5: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
-    failures=0
+    log(f'Monitor v4.0: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
+    failures=0;slow_count=0;slow_identity=None
     try:wait_ready(wait)
     except Exception as exc:log(f'Startup readiness pending: {exc}')
     while True:
         next_check=interval
+        region=(read_json(DATA/'settings.json',{}) or {}).get('region',region) if POLICY.get('region_pool') else region
         try:
             ip,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
             state=read_json(STATE,{}) or {}
             config=read_json(CONFIG,{}) or {}
             diag=connected_id()
+            identity=(ip,diag,started_at())
+            if identity!=slow_identity:slow_count=0;slow_identity=identity
+            slow=speed_reason(speed)
+            slow_count=slow_count+1 if slow else 0
+            if slow:
+                log(f'{slow}; confirmation {slow_count}/{POLICY.get("slow_threshold",2)}')
+                if slow_count>=int(POLICY.get('slow_threshold',2)):
+                    log('Confirmed low throughput; searching for a faster exit')
+                    search(region,wait,delay,gemini,mb,strict)
+                    slow_count=0;failures=0
+                    time.sleep(interval);continue
+                next_check=min(interval,30)
             changed=bool(state) and (ip!=state.get('ip') or diag!=state.get('diagnostic_id'))
-            if not reason and state.get('pin_prepared') and config.get('TargetServerEntry'):
+            if not reason and not speed_reason(speed) and state.get('pin_prepared') and config.get('TargetServerEntry'):
                 if pin_prepared_verification(region,ip,geo,diag,reason,state):
                     failures=0
                     time.sleep(interval)
@@ -453,6 +551,7 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
                 log(f'Healthy exit unchanged: {ip} Google={geo} Gemini={verdict}; '
                     + ('adopted (not pinned)' if state.get('adopted_unpinned') else 'pinned'))
         except Exception as exc:
+            slow_count=0
             failures+=1
             # An outage must not postpone retries for a full hourly health interval.
             next_check=min(interval,30)
@@ -478,15 +577,83 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
                 failures=0
         time.sleep(next_check)
 
+def pool_monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
+    """Check sampled exits of a multi-tunnel pool; no single-IP PIN claim is made."""
+    slow_count=0;failures=0
+    log(f'Multi-tunnel monitor: {POLICY.get("tunnel_pool")} tunnels; PIN disabled')
+    while True:
+        next_check=interval
+        try:
+            region=(read_json(DATA/'settings.json',{}) or {}).get('region',region)
+            ip=socks_ip();geo=google_region();verdict=gemini_verdict(gemini)
+            speed=speed_probe(mb) if mb or POLICY.get('min_speed_kib') else None
+            reason=(f'Google={geo}' if geo in POLICY.get('deny_regions',['RU']) else
+                    verdict if verdict in ('REFUSED','CAPTCHA') else
+                    'country mismatch' if strict and region and geo!=region else '')
+            slow_count=slow_count+1 if speed_reason(speed) else 0
+            if slow_count:
+                next_check=min(interval,30)
+                log(f'Low pool throughput: confirmation {slow_count}/{POLICY.get("slow_threshold",2)}; {speed_reason(speed)}')
+            if reason or slow_count>=int(POLICY.get('slow_threshold',2)):
+                region=rotation_regions(region)[0]
+                log(f'Rotating pool: {reason or speed_reason(speed)}; next region={region or "AUTO"}')
+                save_region(region);docker_restart(wait);slow_count=0
+            else:
+                atomic_json(STATE,{'region':region,'ip':ip,'google_region':geo,'gemini':verdict,
+                    'speed_kib_s':speed,'tunnel_pool':int(POLICY.get('tunnel_pool',1)),
+                    'adopted_unpinned':True,'pool_sample':True,
+                    'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+                log(f'Pool sample: exit={ip}, Google={geo}, Gemini={verdict}, speed={speed}')
+            failures=0
+        except Exception as exc:
+            failures+=1;slow_count=0;next_check=min(interval,30)
+            log(f'Pool check UNKNOWN {failures}/{threshold}: {exc}')
+            if failures>=threshold:
+                try:save_region(rotation_regions(region)[0]);docker_restart(wait)
+                except Exception as error:log(f'Pool recovery pending: {error}')
+                failures=0
+        time.sleep(next_check)
+
+def uninstall():
+    """Remove just this instance; retain migration backups and any image used by others."""
+    if os.geteuid()!=0:raise RuntimeError('Run as root')
+    image=''
+    try:
+        mount=run(['docker','inspect','-f','{{range .Mounts}}{{if eq .Destination "/config"}}{{.Source}}{{end}}{{end}}',CONTAINER]).strip()
+        if mount!=str(CONFIG.parent):raise RuntimeError('Foreign container mount; refusing uninstall')
+        image=run(['docker','inspect','-f','{{.Config.Image}}',CONTAINER]).strip()
+    except RuntimeError as exc:
+        if 'Foreign' in str(exc):raise
+    for unit in (monitor_unit(),CONTAINER+'.service',CONTAINER+'-watchdog.timer',CONTAINER+'-watchdog.service'):
+        subprocess.run(['systemctl','disable','--now',unit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        (Path('/etc/systemd/system')/unit).unlink(missing_ok=True)
+    subprocess.run(['docker','rm','-f',CONTAINER],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    for name in (CONTAINER,'psiphon-autopin'+('' if INSTANCE==1 else f'-{INSTANCE}'),CONTAINER+'-run',CONTAINER+'-prestart',CONTAINER+'-watchdog',CONTAINER+'-gemini-check',CONTAINER+'-advance-region'):
+        (Path('/usr/local/sbin')/name).unlink(missing_ok=True)
+    ENV_FILE.unlink(missing_ok=True)
+    for path in (BASE,DATA,CONFIG.parent.parent):
+        if path.exists():shutil.rmtree(path)
+    run(['systemctl','daemon-reload'])
+    if image:subprocess.run(['docker','image','rm',image],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    print(f'Removed instance {INSTANCE}; backups under /var/backups/psiphon-autopin are retained')
+
 def main():
-    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v3.5')
-    ap.add_argument('command',choices=['check','search','monitor','status','refresh-cache','prepare-pin','set-region'])
+    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v4.0')
+    ap.add_argument('command',choices=['check','search','monitor','status','refresh-cache','prepare-pin','set-region','set-pool','region','pool','rotate','start','stop','restart','logs','speed','uninstall','xray'])
+    ap.add_argument('value',nargs='?')
+    ap.add_argument('--instance',type=int,default=1)
+    ap.add_argument('--region-pool',default=None)
+    ap.add_argument('--deny-regions',default=None)
+    ap.add_argument('--min-speed',type=float,default=None)
+    ap.add_argument('--slow-threshold',type=int,default=None)
+    ap.add_argument('--impersonate',action='store_true',default=None)
+    ap.add_argument('--no-impersonate',dest='impersonate',action='store_false')
     ap.add_argument('--region',default=None)
     ap.add_argument('--allow-interruption',action='store_true',help='Required for refresh-cache (briefly stops Psiphon)')
     ap.add_argument('--port',type=int,default=None)
-    ap.add_argument('--interval',type=int,default=3600)
-    ap.add_argument('--wait',type=int,default=75)
-    ap.add_argument('--delay',type=int,default=12)
+    ap.add_argument('--interval',type=int,default=None)
+    ap.add_argument('--wait',type=int,default=None)
+    ap.add_argument('--delay',type=int,default=None)
     ap.add_argument('--gemini-check',action='store_true',default=None)
     ap.add_argument('--no-gemini-check',dest='gemini_check',action='store_false')
     ap.add_argument('--probe-mb',type=int,default=None)
@@ -494,8 +661,28 @@ def main():
     ap.add_argument('--no-strict-region',dest='strict_region',action='store_false')
     ap.add_argument('--fail-threshold',type=int,default=None)
     args=ap.parse_args()
+    force_rotate=(args.command=='rotate')
+    if not 1<=args.instance<=99:ap.error('instance must be 1..99')
+    if args.instance!=1:configure_instance(args.instance)
+    if args.command in ('region','pool'):
+        if args.value is None:ap.error('region/pool requires a value')
+        if args.command=='region':args.region=args.value;args.command='set-region'
+        else:args.region_pool=args.value;args.command='set-pool'
+    if args.command=='rotate':args.command='search'
     if args.command=='set-region' and args.region is None:ap.error('set-region requires --region CC|AUTO')
     settings=read_json(DATA/'settings.json',{}) or {}
+    for key,default in [('interval',300),('wait',75),('delay',12)]:
+        if getattr(args,key) is None:setattr(args,key,int(settings.get(key,default)))
+    global POLICY
+    POLICY=dict(settings)
+    for key,value in [('region_pool',args.region_pool),('deny_regions',args.deny_regions)]:
+        if value is not None:
+            try:POLICY[key]=countries(value)
+            except ValueError as exc:ap.error(str(exc))
+    if args.min_speed is not None:POLICY['min_speed_kib']=args.min_speed
+    if args.slow_threshold is not None:POLICY['slow_threshold']=args.slow_threshold
+    if args.impersonate is not None:POLICY['impersonate']=args.impersonate
+    if not math.isfinite(float(POLICY.get('min_speed_kib',0))) or float(POLICY.get('min_speed_kib',0))<0 or int(POLICY.get('slow_threshold',2))<2:ap.error('min-speed>=0; slow-threshold>=2')
     # settings.json stores the effective service configuration for status and CLI.
     # Explicit CLI arguments still win over persisted settings.
     if args.gemini_check is None:args.gemini_check=bool(settings.get('gemini_check',False))
@@ -506,29 +693,57 @@ def main():
     global PROXY
     port=args.port if args.port is not None else int(settings.get('port',40000))
     if not 1024 <= port <= 65534:ap.error('port must be 1024..65534')
-    PROXY=f'127.0.0.1:{port}'
+    bind=str(settings.get('bind','127.0.0.1'))
+    try:
+        if ipaddress.ip_address(bind).version!=4:raise ValueError('IPv4 required')
+    except ValueError:ap.error('invalid bind address')
+    PROXY=f'{bind}:{port}'
     if region=='AUTO':region=''
     if region and not re.fullmatch('[A-Z]{2}',region):ap.error('invalid country')
     if args.interval<60 or args.wait<20 or args.delay<2:ap.error('interval>=60 wait>=20 delay>=2')
     if not 0<=args.probe_mb<=10 or not 2<=args.fail_threshold<=20:ap.error('probe-mb 0..10, fail-threshold 2..20')
     if args.command=='status':
-        print(json.dumps({'backend':backend(),'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
+        print(json.dumps({'instance':INSTANCE,'region_pool':POLICY.get('region_pool',[]),'min_speed_kib':POLICY.get('min_speed_kib',0),'slow_threshold':POLICY.get('slow_threshold',2),'deny_regions':POLICY.get('deny_regions',['RU']),'impersonate':POLICY.get('impersonate',False),'backend':backend(),'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
+    if args.command=='xray':
+        print(json.dumps({'tag':'psiphon-out'+('' if INSTANCE==1 else f'-{INSTANCE}'),'protocol':'socks','settings':{'servers':[{'address':bind,'port':port}]}},indent=2));return 0
+    if args.command=='uninstall':uninstall();return 0
+    if args.command=='logs':
+        return subprocess.call(['journalctl','-u',monitor_unit(),'-u',CONTAINER+'.service','-n',args.value or '50','--no-pager'])
+    if args.command=='speed':speed_probe(args.probe_mb or 4);return 0
+    if args.command in ('start','stop','restart'):
+        if args.command!='start':run(['systemctl','stop',monitor_unit()])
+        tunnel_action(args.command)
+        if args.command!='stop':run(['systemctl','start',monitor_unit()])
+        return 0
     if args.command=='check':
-        *_,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
-        return 2 if reason else 0
+        _,_,_,speed,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
+        return 2 if reason or speed_reason(speed) else 0
     DATA.mkdir(parents=True,exist_ok=True)
     resume_monitor=False
-    if args.command=='set-region':
-        active=subprocess.run(['systemctl','is-active','--quiet','psiphon-autopin.service']).returncode==0
+    if args.command in ('set-region','set-pool','search'):
+        active=subprocess.run(['systemctl','is-active','--quiet',monitor_unit()]).returncode==0
         if active:
-            run(['systemctl','stop','psiphon-autopin.service'],timeout=120)
+            run(['systemctl','stop',monitor_unit()],timeout=120)
             resume_monitor=True
     try:
         with (DATA/'lock').open('w') as f:
             try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except BlockingIOError:raise RuntimeError('Another search/monitor is running')
+            if args.region is None:region=(read_json(DATA/'settings.json',{}) or {}).get('region',region)
+            if force_rotate:
+                pool=rotation_regions(region);region=pool[0]
+                save_region(region)
+                docker_restart(args.wait)
             if args.command=='set-region':
-                set_region(region,args.wait)
+                set_region(region,args.wait,clear_pool=True)
+            elif args.command=='set-pool':
+                settings=read_json(DATA/'settings.json',{}) or {}
+                if args.region_pool is None:ap.error('set-pool requires --region-pool CC,CC or an empty string')
+                settings['region_pool']=countries(args.region_pool)
+                atomic_json(DATA/'settings.json',settings)
+                POLICY['region_pool']=settings['region_pool']
+                if settings['region_pool'] and region not in settings['region_pool']:set_region(settings['region_pool'][0],args.wait)
+                log('Region pool saved: '+str(settings['region_pool']))
             elif args.command=='refresh-cache':
                 # Explicit operator action with an interruption: stop, export, start.
                 # Never claim this happens without a connection interruption.
@@ -538,7 +753,7 @@ def main():
                 log('Candidate cache refreshed; Psiphon container restarted (tunnel may change)')
             elif args.command=='prepare-pin':
                 ip,geo,verdict,speed,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
-                if reason:raise RuntimeError(f'Exit is not eligible for pin staging: {reason}')
+                if reason or speed_reason(speed):raise RuntimeError(f'Exit is not eligible for pin staging: {reason or speed_reason(speed)}')
                 state=read_json(STATE,{}) or {}
                 diag=connected_id()
                 if not state or state.get('ip')!=ip or state.get('diagnostic_id')!=diag:
@@ -547,11 +762,14 @@ def main():
                 if not prepare_current_pin(region,ip,geo,diag):
                     log('No unique cached matching server (or pin already prepared); tunnel untouched')
             elif args.command=='search':
-                search(region,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region)
+                if int(POLICY.get('tunnel_pool',1))>1:
+                    if not force_rotate:save_region(rotation_regions(region)[0]);docker_restart(args.wait)
+                else:search(region,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region)
             else:
-                monitor(region,args.interval,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region,args.fail_threshold)
+                loop=pool_monitor if int(POLICY.get('tunnel_pool',1))>1 else monitor
+                loop(region,args.interval,args.wait,args.delay,args.gemini_check,args.probe_mb,args.strict_region,args.fail_threshold)
     finally:
-        if resume_monitor:run(['systemctl','start','psiphon-autopin.service'],timeout=120)
+        if resume_monitor:run(['systemctl','start',monitor_unit()],timeout=120)
     return 0
 
 if __name__=='__main__':

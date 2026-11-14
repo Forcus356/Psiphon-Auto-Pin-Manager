@@ -1,147 +1,130 @@
-<div align="center">
+# Forcus Psiphon Auto-Pin Manager 4.0
 
-# 🛡️ Forcus Psiphon Auto-Pin Manager
+Наш менеджер Psiphon: локальный SOCKS5, выбор конкретных серверов, проверка Google/Gemini и автоматическое восстановление. Эксплуатационные возможности, изученные в Chara, реализованы внутри нашего Python-монитора. Установщик Chara и его watchdog не запускаются.
 
-**Автоматический перебор серверов Psiphon и закрепление выходного IP по геолокации Google**
+## Что добавлено
 
-![Version](https://img.shields.io/badge/version-3.3-blue) ![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-informational) ![Arch](https://img.shields.io/badge/arch-x86__64-lightgrey) [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-green)](LICENSE)
+- Порог скорости и смена выхода после двух последовательных низких измерений. Скорость считается после первого байта, без времени установки соединения. Счётчик сбрасывается при восстановлении скорости и смене контейнера.
+- Пул стран: `NL,DE,PL`. При неудаче поиск переходит к следующей стране; выбранная страна сохраняется между перезапусками.
+- Приоритет ранее проверенных серверов. Их записи сверяются со свежей базой; PIN и данные резерва сохраняются с правами 0600.
+- До 99 независимых экземпляров, отдельные порты, конфигурации, базы и systemd-службы.
+- Опциональная проверка Google CAPTCHA через curl-impersonate. TLS-профиль браузера применяется к странице Gemini; запрос модели идёт обычным curl. Вторая HTTP/2-загрузка поддерживает соединение, пока модель готовит ответ.
+- Список запрещённых стран, быстрая проверка страны Google через YouTube, восстановление недоступного туннеля.
+- CLI: статус, проверка, ротация, страна, пул стран, скорость, журналы, start/stop/restart и удаление отдельного экземпляра.
+- Вывод SOCKS-outbound для Xray, привязка к частному IPv4 и возможность не публиковать HTTP-прокси.
+- Необязательный пул из 2–32 туннелей. В этом режиме выходы проверяются выборочно и точечный PIN отключён.
 
-[English](README.md) | [Русский](README.ru_RU.md) | [فارسی](README.fa_IR.md) | [العربية](README.ar_EG.md) | [中文](README.zh_CN.md) | [Español](README.es_ES.md) | [Türkçe](README.tr_TR.md)
+## Установка
 
-</div>
+Ubuntu/Debian x86_64, root и systemd. Docker и недостающие зависимости устанавливаются автоматически; работающая установка Docker сохраняется.
 
-Менеджер для Linux, который выбирает **конкретные серверы Psiphon**, определяет выходной IP и страну Google **строго через локальный SOCKS5h**, а затем закрепляет подходящее соединение. Если Google начинает определять IP как RU, запускается новый поиск.
-
-## ✨ Возможности
-
-- Перебор отдельных серверов через `TargetServerEntry`, а не только протоколов
-- Чтение списка серверов из BoltDB в режиме read-only
-- Проверка IP и региона Google через SOCKS5h без прямого fallback
-- Двойная проверка перед закреплением, мониторинг и восстановление
-- Выбор страны, локального порта и интервалов
-- Совместимость с установленным Docker CE или Ubuntu `docker.io`
-
-## 📋 Требования
-
-Ubuntu или Debian **x86_64**, права root, systemd, доступ в интернет и место для Docker/Go. Перед запуском установщика с правами root рекомендуется проверить его исходники. Убедитесь, что правила хостинга разрешают прокси/VPN.
-
-## 🚀 Быстрый старт
-
-Интерактивный выбор страны и порта:
+Запускайте файл из нового архива или после публикации новой версии в своём репозитории:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh | sudo bash
+sudo bash install_psiphon_autopin.sh --region NL,DE --port 40000
 ```
 
-### Примеры без вопросов
+Первый экземпляр: SOCKS `127.0.0.1:40000 → 1080` контейнера, HTTP `127.0.0.1:40001 → 8080`.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh | sudo bash -s -- --region PL --port 40000
+# Второй независимый экземпляр: SOCKS 40002, HTTP 40003
+sudo bash install_psiphon_autopin.sh --instance 2 --region DE
+
+# Проверка CAPTCHA с TLS-профилем браузера; файл загружается с проверкой SHA-256
+sudo bash install_psiphon_autopin.sh --region NL,DE --impersonate
+
+# Только SOCKS5 на хосте
+sudo bash install_psiphon_autopin.sh --no-http
+
+# Пул двух одновременных туннелей вместо точечного PIN
+sudo bash install_psiphon_autopin.sh --instance 2 --tunnel-pool 2
 ```
+
+По умолчанию один туннель, порт первого экземпляра 40000, мониторинг каждые 300 секунд, минимальная скорость 800 KiB/s, проба 4 MiB, два низких измерения для ротации, Gemini включён. `--min-speed 0` отключает ротацию по скорости. `--probe-mb 0` при включённом пороге измеряет небольшую страницу вместо отдельной загрузки. Проверка 4 MiB каждые 5 минут расходует около 34 GiB в месяц без учёта дополнительных поисковых проверок.
+
+При обновлении сохраняются прежние страна, порт и сохранённые параметры, если не указаны новые. Для смены страны без сохранения прежнего пула используйте CLI `region`. Недоступный регион, конкретный IP и доступность Gemini не гарантируются.
+
+## CLI
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh | sudo bash -s -- --region DE --port 41000 --interval 1800 --wait 90 --delay 15
+psiphon-autopin status
+psiphon-autopin check
+psiphon-autopin rotate
+psiphon-autopin region NL
+psiphon-autopin pool NL,DE,PL
+psiphon-autopin pool ''
+psiphon-autopin speed
+psiphon-autopin logs 80
+psiphon-autopin restart
+psiphon-autopin stop
+psiphon-autopin start
+psiphon-autopin xray
 ```
 
-## ⚙️ Параметры установщика
+Для второго экземпляра используйте `psiphon-autopin-2`, для третьего — `psiphon-autopin-3`. Алиасы `vps-psiphon`, `vps-psiphon-2` вызывают тот же наш менеджер.
 
-| Параметр | По умолчанию | Описание |
-|---|---|---|
-| `--region DE` | Вопрос; `[DE]` | Страна серверов Psiphon: двухбуквенный код (`DE`, `PL`, `NL` и др.). `AUTO` — без ограничения страны. |
-| `--port 40000` | Вопрос; `40000` | Локальный SOCKS5-порт от **1024 до 65534**. HTTP-прокси будет слушать следующий порт. |
-| `--interval 3600` | `3600` | Период мониторинга в секундах, минимум **60**. |
-| `--wait 75` | `75` | Ожидание подключения Psiphon в секундах, минимум **20**. |
-| `--delay 12` | `12` | Пауза между попытками в секундах, минимум **2**. |
-| `--help` | — | Показать справку установщика. |
+```bash
+psiphon-autopin-2 status
+psiphon-autopin-2 region DE
+psiphon-autopin-2 uninstall
+```
 
-## 🧰 Команды менеджера
+`uninstall` удаляет службы, контейнер, конфигурацию и данные только выбранного экземпляра. Общий образ сохраняется, если он нужен другому контейнеру. Миграционные копии в `/var/backups/psiphon-autopin` сохраняются.
 
-После установки менеджер находится в `/opt/psiphon-autopin/psiphon_autopin.py`. Команды: `status`, `check`, `search`, `monitor`.
+`check`: код 0 — текущая проверка принята, 2 — отказ/запрещённая страна/низкая скорость/несовпадение strict-region, 1 — ошибка. `INCONCLUSIVE` от Gemini не означает успешный ответ модели и не вызывает ротацию сам по себе. Статус `SERVING` относится к анонимной пробе, а не к вашему аккаунту в браузере.
 
-| Command | Description |
+Технические команды сохранены:
+
+```bash
+psiphon-autopin refresh-cache --allow-interruption
+psiphon-autopin prepare-pin
+psiphon-autopin search
+```
+
+Обновление кэша прерывает соединение. Подготовленный PIN считается проверенным только после следующего запуска контейнера и подтверждения IP/ID. Поиск может надолго занять команду; Ctrl+C прекращает его. Ранее работавший монитор затем запускается снова.
+
+## Параметры установщика
+
+| Параметр | Значение |
 |---|---|
-| `status` | Показать регион, прокси и сохранённое закрепление. |
-| `check` | Проверить IP и Google через SOCKS5h. Код выхода: `0` — не RU, `2` — RU, `1` — ошибка. |
-| `search` | Начать перебор до подходящего IP. Предварительно остановите systemd-службу, иначе сработает блокировка параллельного запуска. |
-| `monitor` | Запустить постоянный мониторинг вручную; обычно этим управляет systemd. |
+| `--region NL` / `--region NL,DE` | Одна страна или пул; `AUTO` снимает ограничение |
+| `--region-pool NL,DE` | Отдельная запись пула стран |
+| `--instance N` | 1–99 |
+| `--port N` | SOCKS-порт хоста; HTTP использует следующий |
+| `--bind 172.17.0.1` | Частный IPv4 вместо loopback; адрес должен существовать на хосте |
+| `--bind-loopback` | 127.0.0.1, по умолчанию |
+| `--no-http` / `--http` | Не публиковать / публиковать HTTP |
+| `--interval N` | Период нормальных проверок, минимум 60 секунд |
+| `--wait N` | Ожидание туннеля, минимум 20 секунд |
+| `--delay N` | Пауза между серверами, минимум 2 секунды |
+| `--probe-mb N` | 0–10 MiB на пробу |
+| `--min-speed N` | Порог KiB/s; 0 выключает |
+| `--slow-threshold N` | 2–20 последовательных низких измерений |
+| `--fail-threshold N` | 2–20 ошибок до восстановления |
+| `--deny-regions 'RU BY ...'` | По умолчанию RU BY IR SY CU KP CN VE; пустая строка отключает |
+| `--gemini-check` / `--no-gemini-check` | Включить / выключить пробу Gemini |
+| `--impersonate` / `--no-impersonate` | TLS-профиль браузера для проверки CAPTCHA |
+| `--strict-region` | Требовать совпадения Google с выбранной страной |
+| `--tunnel-pool N` | 1 — PIN; 2–32 — несколько туннелей без PIN |
+| `--backend auto\|console\|vps-psiphon` | Сохранить существующий вариант или выбрать backend |
+
+Для Xray в bridge-контейнере localhost означает сам Xray-контейнер. Используйте host-сеть Xray или существующий частный адрес хоста через `--bind`. Команда `xray` печатает JSON без автоматического изменения панели. Прокси рассчитан на TCP.
+
+## Как работает защита соединения
+
+IP, страна Google, Gemini и измерение скорости идут через SOCKS с удалённым DNS, без прямого fallback. Неопределённая страна не превращается в RU. Географический отказ подтверждается повторно, низкая скорость — заданным числом последовательных измерений. После ошибок повтор выполняется через 30 секунд. Здоровое соединение сохраняется.
+
+Поиск читает BoltDB при остановленном контейнере, выбирает `TargetServerEntry`, сверяет ID подключённого сервера и повторно проверяет выход. Сохранённые записи резерва только повышают приоритет серверов, которые присутствуют в свежей базе. В режиме нескольких туннелей один запрос может идти через один выход, другой — через другой; утверждение о едином закреплённом IP в нём не делается.
+
+Установщик и обновления могут прервать соединения. WARP автоматически не удаляется. Если его порт занят, установка завершается ошибкой. Новые подключения через выбранный сервер могут получить другой выходной IP даже при том же ID.
+
+## Проверки и исходники
 
 ```bash
-python3 /opt/psiphon-autopin/psiphon_autopin.py status
-python3 /opt/psiphon-autopin/psiphon_autopin.py check
+python3 -m unittest discover -s tests -v
+bash -n install_psiphon_autopin.sh
 ```
 
-### Опции менеджера
+Отдельные `psiphon_autopin.py` и `gemini_probe.py` совпадают со встроенными копиями в установщике; это проверяется тестами. Установщик остаётся самостоятельным файлом для `curl | bash`.
 
-Поддерживаются `--region`, `--port`, `--interval`, `--wait`, `--delay`. Значения региона и порта по умолчанию читаются из сохранённых настроек.
-
-## 🛠️ Управление и диагностика
-
-| Action | Command |
-|---|---|
-| Журнал онлайн | `journalctl -u psiphon-autopin -f` |
-| Последние записи | `journalctl -u psiphon-autopin -n 80 --no-pager` |
-| Статус службы | `systemctl status psiphon-autopin --no-pager` |
-| Перезапуск мониторинга | `systemctl restart psiphon-autopin` |
-| Остановка мониторинга | `systemctl stop psiphon-autopin` |
-| Автозапуск мониторинга | `systemctl enable --now psiphon-autopin` |
-| Запуск мониторинга | `systemctl start psiphon-autopin` |
-| Логи Psiphon | `docker logs --tail 80 vps-psiphon` |
-| Контейнер | `docker ps -a --filter name=vps-psiphon` |
-
-## 📌 Примеры
-
-```bash
-# Check the exit strictly through Psiphon SOCKS5h
-curl -4 -fsS --max-time 15 --noproxy '' \
-  --proxy socks5h://127.0.0.1:40000 https://api.ipify.org
-
-# Manual search (stop the monitor to release its lock)
-systemctl stop psiphon-autopin
-python3 /opt/psiphon-autopin/psiphon_autopin.py search --region PL --port 40000
-systemctl start psiphon-autopin
-
-# Stop/start the monitor (does not stop the Psiphon container)
-systemctl stop psiphon-autopin
-systemctl start psiphon-autopin
-```
-
-## 🔄 Принцип работы
-
-Psiphon создаёт локальную базу серверов. Менеджер читает её через Go/BoltDB, выбирает сервер, записывает `TargetServerEntry` и подключается. Выходной IPv4 и регион Google проверяются через локальный SOCKS5h. При успехе IP повторно проверяется и закрепляется. Далее раз в час проводится проверка; поиск запускается при двукратном подтверждении RU. Временная ошибка проверки не приравнивается к RU.
-
-## ⚠️ Важно
-
-- **`--region PL` не означает `Google=PL`.** Критерий принятия сейчас — `Google != RU`.
-- **IP сервера Psiphon может отличаться от выходного IP**, который видит Google.
-- SOCKS5 и HTTP-прокси слушают только `127.0.0.1`; не выставляйте их наружу.
-- Проверка IP/Google идёт через прокси, но загрузка зависимостей и установка используют прямое соединение VPS.
-- При смене сервера действующие подключения обрываются. Конкретный IP и доступность сервисов не гарантируются.
-- `search` и `monitor` используют общую блокировку; не запускайте их одновременно.
-- При смене порта или страны повторите установку с новыми параметрами — возможно переподключение.
-- Проверьте правила хостинга на допустимость VPN/прокси.
-
-## 🩺 Решение проблем
-
-| Error | Resolution |
-|---|---|
-| `containerd.io : Conflicts: containerd` | Конфликт пакетов Docker CE и Ubuntu `docker.io`. v3.3 старается использовать уже имеющийся Docker. Не удаляйте containerd без проверки. |
-| `Config exists but container missing` | Есть конфигурация от прежней установки, но нет ожидаемого контейнера. Сохраните её и определите, какому сервису она принадлежит, прежде чем переносить. |
-| `SOCKS/HTTP port ... occupied` | Занят SOCKS-порт или следующий за ним HTTP-порт. Проверьте через `ss -lntp` и укажите другой `--port`. |
-| `No known servers in region` | База серверов ещё не заполнена или нет записей выбранной страны. Проверьте логи Docker. |
-| `Another search/monitor is running` | Перед ручным `search` остановите `psiphon-autopin.service`. |
-
-## 📂 Пути файлов
-
-| Path | Purpose |
-|---|---|
-| `/opt/vps-psiphon/config/psiphon.config` | Конфигурация Psiphon |
-| `/opt/psiphon-autopin/psiphon_autopin.py` | Менеджер |
-| `/opt/psiphon-autopin/psiphon-server-export` | Экспортёр BoltDB |
-| `/opt/psiphon-autopin/ipregion.sh` | Проверка геолокации |
-| `/var/lib/psiphon-autopin/settings.json` | Страна и порт |
-| `/var/lib/psiphon-autopin/state.json` | Состояние закрепления |
-| `/etc/systemd/system/psiphon-autopin.service` | Служба systemd |
-
-## 📄 Лицензия и авторы
-
-Лицензия [GPL-3.0](LICENSE). Автор проекта — [Forcus356](https://github.com/Forcus356). Используются [Psiphon Tunnel Core](https://github.com/Psiphon-Labs/psiphon-tunnel-core), [ipregion](https://github.com/Davoyan/ipregion), [bbolt](https://github.com/etcd-io/bbolt). Проект независимый и не является официальным продуктом Psiphon.
+Используются [Psiphon Tunnel Core](https://github.com/Psiphon-Labs/psiphon-tunnel-core), [psiphon-docker](https://github.com/swarupsengupta2007/psiphon-docker), [bbolt](https://github.com/etcd-io/bbolt) и опционально [curl-impersonate](https://github.com/lexiforest/curl-impersonate). Подходы к эксплуатационным проверкам изучены в [Chara-Freedom/vps-psiphon](https://github.com/Chara-Freedom/vps-psiphon); его установщик/watchdog не входят в исполняемую цепочку. Лицензия нашего проекта — [GPL-3.0](LICENSE).
