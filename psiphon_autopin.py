@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v4.0.0: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v4.1.2: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import datetime as dt
 import fcntl
@@ -488,7 +488,7 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
         seen_exits.clear()
 
 def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
-    log(f'Monitor v4.0: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
+    log(f'Monitor v4.1: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
     failures=0;slow_count=0;slow_identity=None
     try:wait_ready(wait)
     except Exception as exc:log(f'Startup readiness pending: {exc}')
@@ -634,12 +634,15 @@ def uninstall():
     for path in (BASE,DATA,CONFIG.parent.parent):
         if path.exists():shutil.rmtree(path)
     run(['systemctl','daemon-reload'])
+    if not any(Path('/opt').glob('psiphon-autopin*/autopin_menu.py')):
+        launcher=Path('/usr/local/sbin/auto-pin')
+        if launcher.is_file() and '# Managed by Forcus Auto-Pin menu' in launcher.read_text():launcher.unlink()
     if image:subprocess.run(['docker','image','rm',image],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     print(f'Removed instance {INSTANCE}; backups under /var/backups/psiphon-autopin are retained')
 
 def main():
-    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v4.0')
-    ap.add_argument('command',choices=['check','search','monitor','status','refresh-cache','prepare-pin','set-region','set-pool','region','pool','rotate','start','stop','restart','logs','speed','uninstall','xray'])
+    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v4.1')
+    ap.add_argument('command',choices=['menu','check','search','monitor','status','refresh-cache','prepare-pin','set-region','set-pool','region','pool','rotate','start','stop','restart','logs','speed','uninstall','xray'])
     ap.add_argument('value',nargs='?')
     ap.add_argument('--instance',type=int,default=1)
     ap.add_argument('--region-pool',default=None)
@@ -664,6 +667,8 @@ def main():
     force_rotate=(args.command=='rotate')
     if not 1<=args.instance<=99:ap.error('instance must be 1..99')
     if args.instance!=1:configure_instance(args.instance)
+    if args.command=='menu':
+        return subprocess.call([sys.executable,str(BASE/'autopin_menu.py'),'--instance',str(args.instance)])
     if args.command in ('region','pool'):
         if args.value is None:ap.error('region/pool requires a value')
         if args.command=='region':args.region=args.value;args.command='set-region'
