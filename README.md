@@ -6,7 +6,7 @@
 
 **Local SOCKS5 · automatic server PIN · Google/Gemini checks · recovery**
 
-![Version](https://img.shields.io/badge/version-4.3.0-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.1-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -61,6 +61,14 @@ These guides are available in seven languages. The console menu currently uses R
 
 ## Console Menu
 
+**Templates — quick setup:** choose **t** at the top of the main menu. On a clean VPS, Enter opens templates too. The three choices are **1 — Gemini: yes / YouTube: yes**, **2 — Gemini: yes / YouTube: no**, **3 — Gemini: no / YouTube: yes**.
+
+To install both immediately: **Enter → 1 → y → y**. The wizard previews two independent instances with separate SOCKS/HTTP ports. When the standard ports are free, Gemini uses `127.0.0.1:40000` and YouTube uses `127.0.0.1:40002`; YouTube requests AUTO, requires Google RU, and starts with a 1500 KiB/s floor. Edit country, ports, watchdog and connection output before confirming; YouTube also exposes its speed floor. One common confirmation installs both in sequence; their monitors then run simultaneously. The main menu returns; item **4** changes the displayed instance without stopping the others.
+
+Templates create **new** instances and preserve installed ones. Use Easy / Advanced to edit an existing instance. If the second installation fails, the first is kept and the partial result is reported explicitly. Started services do not mean the exit IP or PIN has been verified.
+
+Boolean prompts explain **1 — enable, 0 — disable, Enter — keep the current value**. They also accept да/нет and y/n. For installation confirmation, y or 1 means yes, n or 0 means no, and Enter cancels.
+
 After an interactive installation or apply, the selected instance’s main auto-pin menu opens automatically. If the IP check/search is still pending, it says so; a started service is not presented as a verified exit. Press **r** to refresh the displayed saved result. This does not launch a new network probe. Noninteractive automation exits normally.
 
 **Easy:** country, connection output, Gemini, SOCKS port and watchdog minutes. **Advanced:** all installer settings. Main-menu items 3 and 4 provide operations and instance selection.
@@ -81,6 +89,10 @@ Illustrative output from the current menu renderer; the addresses and status bel
 ![Menu preview](docs/assets/menu-preview.png)
 
 ![Easy Mode — YouTube](docs/assets/easy-mode-preview.png)
+
+![Templates — Gemini / YouTube](docs/assets/templates-preview.png)
+
+[Templates (.txt)](docs/assets/templates-demo.txt)
 
 [Easy Mode (.txt)](docs/assets/easy-mode-demo.txt)
 

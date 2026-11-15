@@ -6,7 +6,7 @@
 
 **本地 SOCKS5 · 自动固定服务器 · Google/Gemini 检查 · 自动恢复**
 
-![Version](https://img.shields.io/badge/version-4.3.0-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.1-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -61,6 +61,14 @@ auto-pin
 
 ## 控制台菜单
 
+**模板快速设置：**选择主菜单顶部的 **t**。全新 VPS 上直接按 Enter 也会打开模板。三个选项为：**1 — Gemini：是 / YouTube：是**、**2 — Gemini：是 / YouTube：否**、**3 — Gemini：否 / YouTube：是**。
+
+同时安装两者：**Enter → 1 → y → y**。向导会预览两个独立实例及不同的 SOCKS/HTTP 端口。标准端口空闲时，Gemini 为 `127.0.0.1:40000`，YouTube 为 `127.0.0.1:40002`；YouTube 使用 AUTO 地区，强制要求 Google RU，默认速度门槛为 1500 KiB/s。确认前可修改地区、端口、watchdog、连接输出格式及 YouTube 速度门槛。一次共同确认后依次安装，两个监控程序随后同时运行。安装后返回主菜单；选项 **4** 切换当前显示的实例，不会停止其他实例。
+
+模板创建**新实例**，保留现有实例。修改已有实例请使用 Easy / Advanced。第二个实例安装失败时保留第一个，并明确报告部分完成。服务启动不代表出口 IP 或 PIN 已验证。
+
+所有开关均明确提示：**1 — 启用，0 — 禁用，Enter — 保持当前值**；也接受 да/нет 或 y/n。安装确认时 y 或 1 表示同意，n 或 0 表示拒绝，Enter 表示取消。
+
 交互安装或应用设置后，自动打开所选实例的 auto-pin 主菜单。IP 搜索或检查尚未完成时会明确提示，服务启动不代表出口已验证。按 **r** 刷新已保存的显示结果，不会发起新的网络探测。非交互自动化仍正常退出。
 
 **Easy：**地区、连接输出格式、Gemini、SOCKS 端口及以分钟计的 watchdog。**Advanced：**所有安装参数。主菜单第 3、4 项分别用于维护和选择实例。
@@ -81,6 +89,10 @@ Enter 保留当前值；`-` 清空国家列表。输入拉丁字母 `y` 查看�
 ![菜单预览](docs/assets/menu-preview.png)
 
 ![Easy Mode — YouTube](docs/assets/easy-mode-preview.png)
+
+![Templates — Gemini / YouTube](docs/assets/templates-preview.png)
+
+[Templates (.txt)](docs/assets/templates-demo.txt)
 
 [Easy Mode (.txt)](docs/assets/easy-mode-demo.txt)
 

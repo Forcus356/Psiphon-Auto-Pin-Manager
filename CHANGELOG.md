@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.3.1 — 2026-11-15
+
+- Top-level Templates with three presets: Gemini + YouTube, Gemini only, YouTube only. Clean interactive installs open templates on Enter.
+- One reviewed plan and common confirmation installs two independent instances sequentially; both monitors then run concurrently. Regions, ports, watchdog, output format and YouTube speed are editable before installation.
+- Allocate unused instance IDs and SOCKS/HTTP pairs; preserve existing instances. Recheck ports at confirmation and refuse to overwrite an instance created concurrently. Report partial installation accurately, retaining successful instances.
+- Explicit numeric boolean prompts (1 on / 0 off / Enter keep), validated confirmation prompts and simpler YouTube help.
+- Initial installer and installed menu use the same child-install flow, return to the main menu, and show a role/port overview for multiple instances. CLI settings remain unchanged.
+- Documented templates in all seven READMEs and added isolated installer/PTY regression tests.
+
 ## 4.3.0 — 2026-11-15
 
 - Interactive installation/apply returns to the selected instance status menu, with explicit pending verification, refresh action and no nested installer lock. Updates reopen the newly installed UI.

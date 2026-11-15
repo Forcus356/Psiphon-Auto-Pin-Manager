@@ -22,10 +22,10 @@ class UpdateTests(unittest.TestCase):
     def setUp(self):
         temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup);self.base=Path(temp.name)
         p=patch.object(u,'ROOT',self.base);p.start();self.addCleanup(p.stop)
-        app=u.paths(2)['app'];app.mkdir(parents=True);(app/'psiphon_autopin.py').touch();(app/'autopin_menu.py').write_text("VERSION='4.3.0'\n")
+        app=u.paths(2)['app'];app.mkdir(parents=True);(app/'psiphon_autopin.py').touch();(app/'autopin_menu.py').write_text("VERSION='4.3.1'\n")
         config=u.defaults(2);config.update(youtube_mode=True,gemini_check=False,min_speed_kib=1500,region='')
         self.settings=u.paths(2)['data']/'settings.json';u.atomic_json(self.settings,config);self.before=self.settings.read_bytes()
-        self.source=INSTALLER.replace('4.3.0','4.4.0')
+        self.source=INSTALLER.replace('4.3.1','4.4.0')
     def test_fetch_uses_immutable_commit_and_verifies_blob_before_execution(self):
         payload=metadata(self.source)
         with patch.object(u,'update_json',side_effect=payload) as fetch:
@@ -42,7 +42,7 @@ class UpdateTests(unittest.TestCase):
         for payload in ([{'sha':'main'}],[{'sha':None}], [{'sha':'1'*40},{'type':'file','path':'other.sh','encoding':'base64'}]):
             with self.subTest(payload=payload),patch.object(u,'update_json',side_effect=payload),self.assertRaises(ValueError):u.fetch_update(self.base/'bad.sh')
     def test_downgrade_is_rejected_before_apply(self):
-        payload=metadata(INSTALLER.replace('4.3.0','4.2.0'))
+        payload=metadata(INSTALLER.replace('4.3.1','4.2.0'))
         terminal=menu.Terminal(['да']);view=u.Menu(terminal,instance=2)
         with patch.object(u,'update_json',side_effect=payload),patch.object(u.subprocess,'run',return_value=subprocess.CompletedProcess([],0,stdout='',stderr='')) as run:
             self.assertFalse(view.update())
@@ -76,7 +76,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(u.installer_for(1,new),new)
     def test_launcher_prefers_newer_menu_with_numeric_versions(self):
         launcher=heredoc('MENU_LAUNCHER').replace("Path('/opt')","Path("+repr(str(self.base/'opt'))+")")
-        for old,new in [('4.2.0','4.3.0'),('4.9.0','4.10.0')]:
+        for old,new in [('4.2.0','4.3.1'),('4.9.0','4.10.0')]:
             for number,version,label in [(1,old,'OLD'),(2,new,'NEW')]:
                 path=u.paths(number)['app']/'autopin_menu.py';path.parent.mkdir(parents=True,exist_ok=True)
                 path.write_text("VERSION='"+version+"'\nimport sys\nprint('"+label+" '+' '.join(sys.argv[1:]))\n")

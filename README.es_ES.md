@@ -6,7 +6,7 @@
 
 **SOCKS5 local · PIN automático · Google/Gemini · recuperación**
 
-![Version](https://img.shields.io/badge/version-4.3.0-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.1-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -61,6 +61,14 @@ Hay documentación en siete idiomas. El menú de consola está actualmente en ru
 
 ## Menú de consola
 
+**Plantillas — inicio rápido:** elige **t** en la parte superior del menú. En un VPS nuevo, Enter también abre las plantillas. Opciones: **1 — Gemini: sí / YouTube: sí**, **2 — Gemini: sí / YouTube: no**, **3 — Gemini: no / YouTube: sí**.
+
+Para instalar ambos: **Enter → 1 → y → y**. El asistente muestra dos instancias independientes con puertos SOCKS/HTTP distintos. Si están libres, Gemini usa `127.0.0.1:40000` y YouTube `127.0.0.1:40002`; YouTube utiliza AUTO, exige Google RU y un mínimo inicial de 1500 KiB/s. Puedes editar país, puertos, watchdog y formato de conexión; también la velocidad mínima de YouTube. Una confirmación común instala ambos en secuencia y sus monitores funcionan simultáneamente. El menú vuelve a abrirse; **4** cambia la instancia mostrada sin detener las demás.
+
+Las plantillas crean instancias **nuevas** y conservan las existentes. Para editar una existente, utiliza Easy / Advanced. Si falla la segunda instalación, se conserva la primera y se informa del resultado parcial. Iniciar los servicios no confirma todavía la IP ni el PIN.
+
+Los interruptores indican **1 — activar, 0 — desactivar, Enter — conservar el valor actual**; también aceptan да/нет o y/n. Al confirmar, y o 1 significa sí, n o 0 significa no y Enter cancela.
+
 Tras instalar o aplicar interactivamente, se abre automáticamente el menú principal de la instancia elegida. Si la búsqueda o prueba IP sigue pendiente, se indica; un servicio iniciado no equivale a una salida verificada. Pulsa **r** para refrescar el resultado guardado sin iniciar otra prueba de red. La automatización no interactiva termina normalmente.
 
 **Easy:** país, formato de conexión, Gemini, puerto SOCKS e intervalo del watchdog en minutos. **Advanced:** todas las opciones. Los puntos 3 y 4 del menú principal permiten administrar y seleccionar la instancia.
@@ -81,6 +89,10 @@ Ejemplo del renderizador actual; las direcciones y los estados mostrados son dat
 ![Vista previa del menú](docs/assets/menu-preview.png)
 
 ![Easy Mode — YouTube](docs/assets/easy-mode-preview.png)
+
+![Templates — Gemini / YouTube](docs/assets/templates-preview.png)
+
+[Templates (.txt)](docs/assets/templates-demo.txt)
 
 [Easy Mode (.txt)](docs/assets/easy-mode-demo.txt)
 

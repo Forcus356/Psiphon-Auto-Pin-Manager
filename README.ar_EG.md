@@ -6,7 +6,7 @@
 
 **SOCKS5 محلي · تثبيت تلقائي للخادم · فحص Google/Gemini · استعادة الاتصال**
 
-![Version](https://img.shields.io/badge/version-4.3.0-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.1-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -71,6 +71,14 @@ auto-pin
 
 ## قائمة الطرفية
 
+**القوالب — إعداد سريع:** اختر **t** أعلى القائمة الرئيسية. على VPS جديد يفتح Enter القوالب أيضًا. الخيارات الثلاثة: **1 — Gemini: نعم / YouTube: نعم**، **2 — Gemini: نعم / YouTube: لا**، **3 — Gemini: لا / YouTube: نعم**.
+
+لتثبيت الاثنين معًا: **Enter → 1 → y → y**. يعرض المعالج مثيلين مستقلين بمنافذ SOCKS/HTTP مختلفة. عندما تكون المنافذ القياسية متاحة، يستخدم Gemini العنوان `127.0.0.1:40000` ويستخدم YouTube العنوان `127.0.0.1:40002`؛ منطقة YouTube هي AUTO، وبلد Google المطلوب RU، وحد السرعة الأولي 1500 KiB/s. يمكن تعديل البلد والمنافذ وwatchdog وصيغة الاتصال وحد سرعة YouTube قبل التأكيد. تأكيد مشترك واحد يثبتهما بالتتابع، ثم تعمل المراقبتان في الوقت نفسه. تعود القائمة الرئيسية؛ الخيار **4** يغير المثيل المعروض دون إيقاف الآخرين.
+
+تنشئ القوالب مثيلات **جديدة** وتحافظ على المثيلات الموجودة. استخدم Easy / Advanced لتعديل مثيل موجود. إذا فشل التثبيت الثاني يبقى الأول وتُعرض النتيجة الجزئية بوضوح. تشغيل الخدمة لا يعني تأكيد عنوان IP أو PIN بعد.
+
+توضح جميع مفاتيح التفعيل: **1 — تفعيل، 0 — تعطيل، Enter — إبقاء القيمة الحالية**؛ وتقبل أيضًا да/нет وy/n. عند تأكيد التثبيت، تعني y أو 1 نعم، وn أو 0 لا، وEnter إلغاء.
+
 بعد التثبيت أو التطبيق التفاعلي تُفتح قائمة auto-pin الرئيسية للنسخة المختارة تلقائيًا. يظهر بوضوح أن البحث أو فحص IP لم يكتمل؛ تشغيل الخدمة لا يعني خروجًا موثّقًا. اضغط **r** لتحديث النتيجة المحفوظة المعروضة دون فحص شبكة جديد. تنتهي الأتمتة غير التفاعلية طبيعيًا.
 
 **Easy:** الدولة، صيغة الاتصال، Gemini، منفذ SOCKS وفترة watchdog بالدقائق. **Advanced:** جميع خيارات المثبّت. البندان 3 و4 في القائمة الرئيسية للإدارة واختيار النسخة.
@@ -91,6 +99,10 @@ Enter يحتفظ بالقيمة، و`-` يمسح قائمة الدول. الحر
 ![معاينة القائمة](docs/assets/menu-preview.png)
 
 ![Easy Mode — YouTube](docs/assets/easy-mode-preview.png)
+
+![Templates — Gemini / YouTube](docs/assets/templates-preview.png)
+
+[Templates (.txt)](docs/assets/templates-demo.txt)
 
 [Easy Mode (.txt)](docs/assets/easy-mode-demo.txt)
 

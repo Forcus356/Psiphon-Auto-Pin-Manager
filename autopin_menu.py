@@ -21,7 +21,7 @@ import tempfile
 import time
 import unicodedata
 
-VERSION='4.3.0'
+VERSION='4.3.1'
 ROOT=Path('/')
 
 @dataclass(frozen=True)
@@ -54,7 +54,7 @@ FIELDS=(
     Field('delay','Пауза между попытками поиска, секунд','int','Минимум 2.',2,2147483647),
     Field('impersonate','TLS-профиль браузера для Gemini','bool','Используется при проверке Gemini. Браузерный профиль загружается с проверкой SHA256.'),
     Field('backend','Вариант запуска','choice','auto сохраняет/определяет текущий вариант; новая установка использует vps-psiphon.',choices=('auto','vps-psiphon','console')),
-    Field('youtube_mode','YouTube Mode','bool','Ищет Google GeoIP = RU через SOCKS5h и проверяет PIN. Это не проверка отсутствия рекламы. Для Gemini нужен другой экземпляр; один туннель, loopback.'),
+    Field('youtube_mode','YouTube Mode','bool','Для YouTube ищется выход, который Google определяет как российский (RU). Чтобы запустить YouTube и Gemini вместе, выберите «Шаблоны» в главном меню.'),
 )
 EASY_KEYS=('region','connection_type','gemini_check','port','interval','youtube_mode')
 TRUE={'1','y','yes','да','д','true','on'}
@@ -162,6 +162,56 @@ def discover():
         p=paths(n)
         if p['manager'].is_file() or (p['data']/'settings.json').is_file():found.append(n)
     return found
+
+TEMPLATES={
+    '1':('Gemini: да · YouTube: да',('gemini','youtube')),
+    '2':('Gemini: да · YouTube: нет',('gemini',)),
+    '3':('Gemini: нет · YouTube: да',('youtube',)),
+}
+
+def mode_label(config):
+    return 'YouTube' if config['youtube_mode'] else 'Gemini' if config['gemini_check'] else 'Psiphon'
+
+def proxy_ports(config):
+    return {config['port'],config['port']+1} if config['publish_http'] else {config['port']}
+
+def ports_available(ports):
+    sockets=[]
+    try:
+        for port in sorted(ports):
+            sock=socket.socket();sockets.append(sock);sock.bind(('127.0.0.1',port))
+        return True
+    except OSError:return False
+    finally:
+        for sock in sockets:sock.close()
+
+def template_plan(choice,preferred=1):
+    """Prepare fresh instances only; never overwrite an existing policy."""
+    installed=discover();used=set(installed);reserved=set()
+    for number in installed:reserved.update(proxy_ports(load_config(number)))
+    plan=[]
+    for role in TEMPLATES[choice][1]:
+        numbers=[preferred]+[n for n in range(1,100) if n!=preferred]
+        number=next((n for n in numbers if n not in used),None)
+        if number is None:raise ValueError('Нет свободного номера экземпляра (1–99)')
+        port=next((n for n in range(40000,65534,2) if not {n,n+1}&reserved and ports_available({n,n+1})),None)
+        if port is None:raise ValueError('Нет свободной пары SOCKS/HTTP-портов')
+        config=defaults(number)
+        config.update(youtube_mode=role=='youtube',gemini_check=role=='gemini',region='' if role=='youtube' else 'NL',
+                      min_speed_kib=1500 if role=='youtube' else 800,port=port)
+        plan.append(config);used.add(number);reserved.update(proxy_ports(config))
+    return plan
+
+def validate_template_plan(plan):
+    installed=set(discover());numbers=set();ports=set();reserved=set()
+    for number in installed:reserved.update(proxy_ports(load_config(number)))
+    for config in plan:
+        validate(config);number=config['instance'];wanted=proxy_ports(config)
+        if number in installed or number in numbers:raise ValueError(f'Экземпляр {number} уже существует; выберите шаблон заново')
+        if wanted&(ports|reserved):raise ValueError('SOCKS/HTTP-порты пересекаются: '+str(sorted(wanted&(ports|reserved))))
+        if not ports_available(wanted):raise ValueError(f'Порт {config["port"]} или HTTP-порт {config["port"]+1} занят; выберите другую пару')
+        numbers.add(number);ports.update(wanted)
+    return plan
 
 UPDATE_REPO='https://api.github.com/repos/Forcus356/Psiphon-Auto-Pin-Manager'
 
@@ -382,7 +432,23 @@ class Menu:
                 self.say('Некорректная кодировка ввода. Повторите ввод; для выбора используйте латиницу или цифры.')
                 continue
             return answer.strip()
-    def confirm(self,text):return self.ask(text+' [y/n, по умолчанию n]: ').lower() in TRUE
+    def confirm(self,text):
+        self.say('Введите y — да, n — нет; Enter — отменить. Также можно 1 / 0.')
+        while True:
+            answer=self.ask(text+' [y/n, по умолчанию n]: ').lower()
+            if not answer or answer in FALSE:return False
+            if answer in TRUE:return True
+            self.say('Введите y или 1 для подтверждения, n или 0 для отмены.')
+    def input_field(self,field,value):
+        self.say(field.help)
+        if field.choices:self.say(' / '.join(f'{n}. {v}' for n,v in enumerate(field.choices,1)))
+        if field.kind=='bool':
+            self.say('1 — Да (включить), 0 — Нет (выключить). Можно также да/нет или y/n.')
+            prompt=f'{field.label} [1 — да / 0 — нет; Enter — оставить «{display(field,value)}»]: '
+        else:prompt=f'{field.label} [{display(field,value)}], Enter — оставить: '
+        text=self.ask(prompt)
+        self._field_entered=bool(text)
+        return parse_field(field,text) if text else value
     def panel(self,title,sections):
         self.say('\n'+self.style.box(title,sections))
     def footer(self):
@@ -469,11 +535,9 @@ class Menu:
             try:
                 index=int(answer)
                 if not 1<=index<=len(fields):raise ValueError
-                field=fields[index-1];self.say(field.help)
-                if field.choices:self.say(' / '.join(f'{n}. {v}' for n,v in enumerate(field.choices,1)))
-                text=self.ask(f'{field.label} [{display(field,self.config[field.key])}], Enter — оставить: ')
-                if text:
-                    value=parse_field(field,text)
+                field=fields[index-1]
+                value=self.input_field(field,self.config[field.key])
+                if self._field_entered:
                     if field.key=='min_speed_kib':self._speed_edited=True
                     if field.key in ('youtube_mode','gemini_check') and value:
                         if not self.enable_mode(field.key):continue
@@ -483,6 +547,78 @@ class Menu:
                     if field.key=='region_pool' and value and self.config['region'] not in value:
                         self.config['region']=value[0];self.say('Выбрана первая страна из пула: '+value[0])
             except (ValueError,TypeError) as exc:self.say('Ошибка: '+(str(exc) or 'выберите номер из меню'))
+    def templates(self):
+        self.panel('Шаблоны · быстрый запуск',[
+            ('ВЫБЕРИТЕ ЧТО ЗАПУСТИТЬ',[f'{key}. {label}' for key,(label,_) in TEMPLATES.items()]),
+            ('',['0. Назад'])])
+        self.say('Вариант 1 запускает оба режима одновременно: два экземпляра, два разных SOCKS-порта.')
+        self.say('Шаблоны создают новые экземпляры. Уже установленные экземпляры продолжают работать без изменений.')
+        while True:
+            choice=self.ask('Выберите шаблон [1 / 2 / 3; 0 — назад]: ')
+            if choice=='0':return False
+            if choice in TEMPLATES:break
+            self.say('Введите номер: 1, 2, 3 или 0.')
+        try:plan=template_plan(choice,self.instance)
+        except (ValueError,OSError) as exc:self.say('Не удалось подготовить шаблон: '+str(exc));return False
+        by_key={field.key:field for field in FIELDS}
+        while True:
+            sections=[];editable=[]
+            for config in plan:
+                rows=[]
+                for key in ('region','port','interval','connection_type')+(('min_speed_kib',) if config['youtube_mode'] else ()):
+                    field=by_key[key];editable.append((config,field))
+                    rows.append(f'{len(editable)}. {field.label}: {display(field,config[key])}')
+                rows.append('Gemini: '+('да' if config['gemini_check'] else 'нет')+' · YouTube: '+('да' if config['youtube_mode'] else 'нет'))
+                rows.append(f'HTTP: 127.0.0.1:{config["port"]+1} · один туннель')
+                sections.append((mode_label(config)+' · экземпляр '+str(config['instance']),rows))
+            sections.append(('', ['y. Установить выбранный шаблон','0. Назад без установки']))
+            self.panel('Шаблон · '+TEMPLATES[choice][0],sections)
+            self.say('Настройки уже готовы. Введите y для установки или номер строки для изменения.')
+            answer=self.ask('Выбор [y — установить; 0 — назад]: ').lower()
+            if answer=='0':return False
+            if answer=='y':
+                try:validate_template_plan(plan)
+                except (ValueError,OSError) as exc:self.say('Ошибка: '+str(exc));continue
+                return self.apply_template_plan(plan)
+            try:
+                index=int(answer)
+                if not 1<=index<=len(editable):raise ValueError('Выберите номер строки')
+                config,field=editable[index-1]
+                config[field.key]=self.input_field(field,config[field.key])
+            except (ValueError,TypeError) as exc:self.say('Ошибка: '+(str(exc) or 'выберите номер строки'))
+    def apply_template_plan(self,plan):
+        try:validate_template_plan(plan)
+        except (ValueError,OSError) as exc:self.say('Шаблон не применён: '+str(exc));return False
+        self.panel('Будут запущены',[
+            ('', [f'{mode_label(c)} · экземпляр {c["instance"]} · SOCKS5 127.0.0.1:{c["port"]} · регион {c["region"] or "AUTO"}' for c in plan])])
+        self.say('Установка выполняется по очереди. После неё оба монитора работают одновременно и ищут свои выходы в фоне.' if len(plan)>1 else 'После установки монитор ищет и проверяет подходящий выход в фоне.')
+        if not self.confirm('Установить выбранный шаблон?'):
+            self.say('Отменено; файлы и службы не изменены.');return False
+        completed=[]
+        try:
+            validate_template_plan(plan)
+            args=[build_args(config) for config in plan]
+            if self.emit_args:
+                atomic_json(self.emit_args,args);return True
+            installer=installer_for(plan[0]['instance'],self.installer)
+            for config,argv in zip(plan,args):
+                self.say(f'Установка {mode_label(config)} · экземпляр {config["instance"]}...')
+                result=subprocess.run(['bash',str(installer),*argv],env={**os.environ,'AUTOPIN_MENU_PARENT':'1','AUTOPIN_CREATE_ONLY':'1'})
+                if result.returncode:raise RuntimeError(f'{mode_label(config)}: установщик завершился с кодом {result.returncode}; проверьте журналы')
+                completed.append(config)
+                self.instance=completed[0]['instance'];self.config=load_config(self.instance);self._status_cache=None;self._speed_edited=False
+                self.say(f'{mode_label(config)} · экземпляр {config["instance"]}: установка завершена; подтверждение выхода выполняется монитором.')
+        except (ValueError,OSError,RuntimeError) as exc:
+            self.say('Шаблон установлен не полностью: '+str(exc))
+            if completed:
+                self.say('Уже установлены и сохранены: '+', '.join(f'{mode_label(c)} (экземпляр {c["instance"]})' for c in completed)+'.')
+            self.say('Общий успех не подтверждён. Уже установленные экземпляры не удаляются; состояние доступно в главном меню.')
+            return False
+        self.say('Шаблон установлен. Запуск служб ещё не означает найденный и проверенный IP.')
+        for config in plan:
+            self.say(f'{mode_label(config)}: socks5h://127.0.0.1:{config["port"]} · меню: auto-pin --instance {config["instance"]}')
+        self.say('Главное меню → 4 переключает отображаемый экземпляр. Остальные продолжают работать.')
+        return True
     def enable_mode(self,key):
         other='gemini_check' if key=='youtube_mode' else 'youtube_mode'
         label='YouTube' if key=='youtube_mode' else 'Gemini'
@@ -633,15 +769,23 @@ class Menu:
     def run(self):
         while True:
             self.panel(f'Forcus Auto-Pin {VERSION} · экземпляр {self.instance}',[
+                ('БЫСТРЫЙ ЗАПУСК',['t. Шаблоны — Gemini / YouTube / оба вместе']),
                 ('НАСТРОЙКА',['1. Easy Mode — основные настройки','2. Advanced Mode — все настройки']),
                 ('ОБСЛУЖИВАНИЕ',['3. Управление и диагностика','4. Выбрать / создать экземпляр']),
                 ('ОБНОВЛЕНИЕ',['5. Обновить Auto-Pin (GitHub)']),
                 ('', ['r. Обновить состояние','0. Выход'])])
+            installed=discover()
+            if len(installed)>1:
+                self.say('Экземпляры: '+'; '.join(f'{n} — {mode_label(load_config(n))}, SOCKS {load_config(n)["port"]}' for n in installed))
+                self.say('Ниже показано состояние выбранного экземпляра '+str(self.instance)+'. Переключение: пункт 4.')
             self.footer()
-            answer=self.ask('Выбор [Enter — '+self.config['menu_mode'].title()+']: ')
-            if answer=='':answer='1' if self.config['menu_mode']=='easy' else '2'
+            first_install=not installed
+            answer=self.ask('Выбор [Enter — '+('Шаблоны' if first_install else self.config['menu_mode'].title())+']: ').lower()
+            if answer=='':answer='t' if first_install else '1' if self.config['menu_mode']=='easy' else '2'
             if answer=='0':return 0
-            if answer in ('1','2'):
+            if answer=='t':
+                if self.templates() and self.emit_args:return 0
+            elif answer in ('1','2'):
                 applied=self.edit('easy' if answer=='1' else 'advanced')
                 if applied and self.emit_args:return 0
             elif answer=='3':

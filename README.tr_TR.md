@@ -6,7 +6,7 @@
 
 **Yerel SOCKS5 · otomatik PIN · Google/Gemini denetimi · kurtarma**
 
-![Version](https://img.shields.io/badge/version-4.3.0-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.1-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -61,6 +61,14 @@ Belgeler yedi dilde sunulur. Konsol menüsünün etiketleri şu anda Rusçadır;
 
 ## Konsol Menüsü
 
+**Şablonlar — hızlı kurulum:** ana menünün üstündeki **t** seçeneğini açın. Temiz VPS üzerinde Enter da şablonları açar. Seçenekler: **1 — Gemini: evet / YouTube: evet**, **2 — Gemini: evet / YouTube: hayır**, **3 — Gemini: hayır / YouTube: evet**.
+
+İkisini birlikte kurmak için: **Enter → 1 → y → y**. Sihirbaz ayrı SOCKS/HTTP portlarına sahip iki bağımsız örneği gösterir. Standart portlar boşsa Gemini `127.0.0.1:40000`, YouTube `127.0.0.1:40002` kullanır; YouTube bölgesi AUTO, zorunlu Google ülkesi RU ve başlangıç hız eşiği 1500 KiB/s olur. Ülke, port, watchdog ve bağlantı biçimi ile YouTube hız eşiği değiştirilebilir. Tek ortak onayla sırayla kurulur, ardından iki monitör aynı anda çalışır. Ana menü yeniden açılır; **4** diğerlerini durdurmadan görüntülenen örneği değiştirir.
+
+Şablonlar **yeni** örnekler oluşturur, mevcutları korur. Mevcut örnek için Easy / Advanced kullanın. İkinci kurulum başarısız olursa ilk örnek korunur ve kısmi sonuç açıkça gösterilir. Servisin başlaması IP veya PIN doğrulaması demek değildir.
+
+Açma/kapama soruları **1 — aç, 0 — kapat, Enter — mevcut değeri koru** der; да/нет ve y/n de kabul edilir. Kurulum onayında y veya 1 evet, n veya 0 hayır, Enter iptal anlamına gelir.
+
 Etkileşimli kurulum veya uygulamadan sonra seçili örneğin ana auto-pin menüsü otomatik açılır. IP araması/denetimi sürüyorsa açıkça belirtilir; servis başlangıcı doğrulanmış çıkış demek değildir. Yeni ağ testi başlatmadan kayıtlı sonucu yenilemek için **r** kullanın. Etkileşimsiz otomasyon normal biter.
 
 **Easy:** ülke, bağlantı çıktısı, Gemini, SOCKS portu ve dakika olarak watchdog. **Advanced:** tüm kurulum seçenekleri. Ana menünün 3 ve 4 numaralı maddeleri işlemler ve örnek seçimi içindir.
@@ -81,6 +89,10 @@ Güncel menü oluşturucusundan örnek çıktı; adresler ve durumlar gösterim 
 ![Menü önizlemesi](docs/assets/menu-preview.png)
 
 ![Easy Mode — YouTube](docs/assets/easy-mode-preview.png)
+
+![Templates — Gemini / YouTube](docs/assets/templates-preview.png)
+
+[Templates (.txt)](docs/assets/templates-demo.txt)
 
 [Easy Mode (.txt)](docs/assets/easy-mode-demo.txt)
 

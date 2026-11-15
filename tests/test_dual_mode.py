@@ -7,12 +7,10 @@ import unittest
 from unittest.mock import patch
 import test_installation as installation
 
-class DualModeInstallerTests(unittest.TestCase):
-    install=installation.InstallationTests.install
-    def test_two_modes_export_update_and_disable_without_touching_the_other(self):
-        fake=installation.FAKE
-        start="state_path=base/'state';state=json.loads(state_path.read_text())\nconf=base/'opt/vps-psiphon/config'\ndef save():state_path.write_text(json.dumps(state))"
-        replacement="""state_path=base/'state';whole=json.loads(state_path.read_text());name='vps-psiphon'
+def multi_instance_fake():
+    fake=installation.FAKE
+    start="state_path=base/'state';state=json.loads(state_path.read_text())\nconf=base/'opt/vps-psiphon/config'\ndef save():state_path.write_text(json.dumps(state))"
+    replacement="""state_path=base/'state';whole=json.loads(state_path.read_text());name='vps-psiphon'
 if cmd=='systemctl' and len(args)>1 and args[1].startswith('vps-psiphon') and args[1].endswith('.service'):
     name=args[1][:-8]
 elif cmd=='docker':
@@ -21,14 +19,20 @@ elif cmd=='docker':
 state=whole if name=='vps-psiphon' else whole.setdefault('instances',{}).setdefault(name,dict(legacy=False,console=False,running=False,image='',ports={}))
 conf=base/('opt/'+name+'/config')
 def save():state_path.write_text(json.dumps(whole))"""
-        assert start in fake;fake=fake.replace(start,replacement)
-        fake=fake.replace("if args[:2]==['cat','vps-psiphon.service']:","if args[:2]==['cat',name+'.service']:")
-        fake=fake.replace("sys.exit(0 if state['legacy'] else 1)","sys.exit(0 if state['legacy'] or (base/('etc/systemd/system/'+name+'.service')).exists() else 1)")
-        fake=fake.replace("if args[:2]==['stop','vps-psiphon.service']:","if args[:2]==['stop',name+'.service']:")
-        fake=fake.replace("(base/'etc/systemd/system/vps-psiphon.service')","(base/('etc/systemd/system/'+name+'.service'))")
-        fake=fake.replace("(['start','vps-psiphon.service'],['restart','vps-psiphon.service'])","(['start',name+'.service'],['restart',name+'.service'])")
-        fake=fake.replace("str(base/'usr/local/sbin/vps-psiphon-run')","str(base/('usr/local/sbin/'+name+'-run'))")
-        fake=fake.replace("state['running']=True;save()\n    elif args and args[0] in", "state['image']=next((a for a in args if '@sha256:' in a),'local-psiphon-console:4.3.0');state['running']=True;save()\n    elif args and args[0] in")
+    assert start in fake;fake=fake.replace(start,replacement)
+    fake=fake.replace("if args[:2]==['cat','vps-psiphon.service']:","if args[:2]==['cat',name+'.service']:")
+    fake=fake.replace("sys.exit(0 if state['legacy'] else 1)","sys.exit(0 if state['legacy'] or (base/('etc/systemd/system/'+name+'.service')).exists() else 1)")
+    fake=fake.replace("if args[:2]==['stop','vps-psiphon.service']:","if args[:2]==['stop',name+'.service']:")
+    fake=fake.replace("(base/'etc/systemd/system/vps-psiphon.service')","(base/('etc/systemd/system/'+name+'.service'))")
+    fake=fake.replace("(['start','vps-psiphon.service'],['restart','vps-psiphon.service'])","(['start',name+'.service'],['restart',name+'.service'])")
+    fake=fake.replace("str(base/'usr/local/sbin/vps-psiphon-run')","str(base/('usr/local/sbin/'+name+'-run'))")
+    fake=fake.replace("state['running']=True;save()\n    elif args and args[0] in", "state['image']=next((a for a in args if '@sha256:' in a),'local-psiphon-console:4.3.1');state['running']=True;save()\n    elif args and args[0] in")
+    return fake
+
+class DualModeInstallerTests(unittest.TestCase):
+    install=installation.InstallationTests.install
+    def test_two_modes_export_update_and_disable_without_touching_the_other(self):
+        fake=multi_instance_fake()
         with patch.object(installation,'FAKE',fake):base,p=self.install(fresh=True)
         self.assertEqual(p.returncode,0,p.stdout+p.stderr)
         env={**os.environ,'PATH':str(base/'bin')+os.pathsep+os.environ['PATH'],'AUTOPIN_TEST_ROOT':str(base)}
