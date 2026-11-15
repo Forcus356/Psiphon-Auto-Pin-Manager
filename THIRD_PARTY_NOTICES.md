@@ -13,15 +13,17 @@ The inclusion of a project in this document does not necessarily imply that its 
 
 ### Attribution
 
-Forcus Auto-Pin acknowledges Chara vps-psiphon as a source of operational ideas and technical reference during development.
+Forcus Auto-Pin acknowledges Chara vps-psiphon as a source of technical reference and operational ideas.
 
-The project has informed the study of Psiphon deployment, connection monitoring, health checks, and automated recovery strategies.
+Portions of the Gemini connectivity verification implementation were adapted from Chara vps-psiphon, originally licensed under the MIT License.
 
-Forcus Auto-Pin provides its own installer, management interface, server PIN functionality, and watchdog implementation.
+These portions have been integrated into the independently developed Forcus Auto-Pin manager.
 
-Certain operational approaches, including Gemini connectivity testing, share similarities with those used in Chara vps-psiphon.
+The original copyright and MIT license notice of Chara Freedom are preserved below.
 
-This acknowledgment is provided for transparency and proper recognition of the original project's contributions. It does not constitute a claim that source code was directly copied or that Forcus Auto-Pin is a fork of Chara vps-psiphon.
+Forcus Auto-Pin maintains its own installer, watchdog, server PIN management, console interface, and additional functionality.
+
+The overall Forcus Auto-Pin project is distributed under GPL-3.0, while the original MIT license notice for the adapted portions is retained.
 
 ### Original MIT License Notice
 
