@@ -26,7 +26,7 @@ def save():state_path.write_text(json.dumps(whole))"""
     fake=fake.replace("(base/'etc/systemd/system/vps-psiphon.service')","(base/('etc/systemd/system/'+name+'.service'))")
     fake=fake.replace("(['start','vps-psiphon.service'],['restart','vps-psiphon.service'])","(['start',name+'.service'],['restart',name+'.service'])")
     fake=fake.replace("str(base/'usr/local/sbin/vps-psiphon-run')","str(base/('usr/local/sbin/'+name+'-run'))")
-    fake=fake.replace("state['running']=True;save()\n    elif args and args[0] in", "state['image']=next((a for a in args if '@sha256:' in a),'local-psiphon-console:4.3.1');state['running']=True;save()\n    elif args and args[0] in")
+    fake=fake.replace("state['running']=True;save()\n    elif args and args[0] in", "state['image']=next((a for a in args if '@sha256:' in a),'local-psiphon-console:4.3.2');state['running']=True;save()\n    elif args and args[0] in")
     return fake
 
 class DualModeInstallerTests(unittest.TestCase):

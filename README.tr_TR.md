@@ -6,7 +6,7 @@
 
 **Yerel SOCKS5 · otomatik PIN · Google/Gemini denetimi · kurtarma**
 
-![Version](https://img.shields.io/badge/version-4.3.1-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.2-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -60,6 +60,8 @@ Belgeler yedi dilde sunulur. Konsol menüsünün etiketleri şu anda Rusçadır;
 <a id="menu"></a>
 
 ## Konsol Menüsü
+
+**Gemini CAPTCHA:** Google `/sorry/` sayfasına yönlendirme hem standart curl hem de isteğe bağlı tarayıcı TLS profiliyle tanınır. Artık eksik oturum alanları (`INCONCLUSIVE`) olarak sınıflandırılmaz. Monitör CAPTCHA yanıtını tekrar doğruladıktan sonra başka çıkış arar. Diğer belirsiz yanıtların politikası değişmez; doğrulanmış PIN tek başına Gemini'nin çalıştığını kanıtlamaz.
 
 **Şablonlar — hızlı kurulum:** ana menünün üstündeki **t** seçeneğini açın. Temiz VPS üzerinde Enter da şablonları açar. Seçenekler: **1 — Gemini: evet / YouTube: evet**, **2 — Gemini: evet / YouTube: hayır**, **3 — Gemini: hayır / YouTube: evet**.
 

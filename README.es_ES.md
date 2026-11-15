@@ -6,7 +6,7 @@
 
 **SOCKS5 local · PIN automático · Google/Gemini · recuperación**
 
-![Version](https://img.shields.io/badge/version-4.3.1-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.2-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -60,6 +60,8 @@ Hay documentación en siete idiomas. El menú de consola está actualmente en ru
 <a id="menu"></a>
 
 ## Menú de consola
+
+**Gemini CAPTCHA:** la redirección a la página `/sorry/` de Google se reconoce tanto con curl estándar como con el perfil TLS opcional. Ya no se clasifica como campos de sesión ausentes (`INCONCLUSIVE`). El monitor confirma el CAPTCHA antes de buscar otra salida. Las demás respuestas indeterminadas conservan su política; un PIN verificado por sí solo no confirma que Gemini funcione.
 
 **Plantillas — inicio rápido:** elige **t** en la parte superior del menú. En un VPS nuevo, Enter también abre las plantillas. Opciones: **1 — Gemini: sí / YouTube: sí**, **2 — Gemini: sí / YouTube: no**, **3 — Gemini: no / YouTube: sí**.
 

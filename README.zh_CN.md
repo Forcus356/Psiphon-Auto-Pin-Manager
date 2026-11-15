@@ -6,7 +6,7 @@
 
 **本地 SOCKS5 · 自动固定服务器 · Google/Gemini 检查 · 自动恢复**
 
-![Version](https://img.shields.io/badge/version-4.3.1-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.2-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -60,6 +60,8 @@ auto-pin
 <a id="menu"></a>
 
 ## 控制台菜单
+
+**Gemini CAPTCHA：**标准 curl 和可选的浏览器 TLS 配置均可识别 Google `/sorry/` 页面重定向，不再将其误判为缺少会话字段（`INCONCLUSIVE`）。监控程序复查确认 CAPTCHA 后搜索其他出口。其他无法确定的响应保留现有策略；PIN 验证成功本身并不证明 Gemini 可用。
 
 **模板快速设置：**选择主菜单顶部的 **t**。全新 VPS 上直接按 Enter 也会打开模板。三个选项为：**1 — Gemini：是 / YouTube：是**、**2 — Gemini：是 / YouTube：否**、**3 — Gemini：否 / YouTube：是**。
 

@@ -6,7 +6,7 @@
 
 **SOCKS5 محلي · تثبيت تلقائي للخادم · فحص Google/Gemini · استعادة الاتصال**
 
-![Version](https://img.shields.io/badge/version-4.3.1-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.2-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -70,6 +70,8 @@ auto-pin
 <a id="menu"></a>
 
 ## قائمة الطرفية
+
+**Gemini CAPTCHA:** يُكتشف التحويل إلى صفحة Google `/sorry/` مع curl العادي ومع ملف TLS الاختياري للمتصفح. لم يعد يُصنف خطأً كغياب حقول الجلسة (`INCONCLUSIVE`). تؤكد المراقبة استجابة CAPTCHA بفحص ثانٍ قبل البحث عن مخرج آخر. تبقى سياسة الردود غير الحاسمة الأخرى كما هي؛ تأكيد PIN وحده لا يثبت عمل Gemini.
 
 **القوالب — إعداد سريع:** اختر **t** أعلى القائمة الرئيسية. على VPS جديد يفتح Enter القوالب أيضًا. الخيارات الثلاثة: **1 — Gemini: نعم / YouTube: نعم**، **2 — Gemini: نعم / YouTube: لا**، **3 — Gemini: لا / YouTube: نعم**.
 

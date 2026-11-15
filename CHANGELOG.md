@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.3.2 — 2026-11-15
+
+- Fix Gemini CAPTCHA detection with the default curl probe: a Google `/sorry/` redirect is classified as CAPTCHA before session-field parsing, even without the optional browser TLS profile. Previously it became INCONCLUSIVE and could keep a challenged exit pinned.
+- Preserve existing confirmed-CAPTCHA rotation, browser-profile checks and genuinely inconclusive response policy. Add regressions for default/profile CAPTCHA, unknown pages, ordinary redirects, fetch failures, valid model replies, rejected adoption and confirmed monitor rotation.
+- Reproduced on the test VPS using the old installed probe and the corrected probe in memory through the same SOCKS5h; no installed files or services were changed by that comparison.
+
 ## 4.3.1 — 2026-11-15
 
 - Top-level Templates with three presets: Gemini + YouTube, Gemini only, YouTube only. Clean interactive installs open templates on Enter.

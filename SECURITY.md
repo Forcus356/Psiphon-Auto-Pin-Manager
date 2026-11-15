@@ -1,4 +1,4 @@
-# Security notes — 4.3.1
+# Security notes — 4.3.2
 
 ## Fixed artifact references
 

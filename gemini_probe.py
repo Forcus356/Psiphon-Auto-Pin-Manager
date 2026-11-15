@@ -75,12 +75,14 @@ def check(port, impersonate_dir=None, host="127.0.0.1"):
         page_common=common if not impersonate_dir else ['--noproxy','','--proxy',proxy,'-b',jar,'-c',jar]
         headers=Path(tmp)/'headers'
         rc,page,err=curl([*page_common,'-D',str(headers),APP],timeout=30,executable=page_binary)
-        if impersonate_dir and headers.exists():
+        # A plain curl request can be redirected to Google CAPTCHA too.
+        # Classify that explicit response before checking application session fields.
+        if headers.exists():
             for line in headers.read_text(errors='replace').splitlines():
                 if line.lower().startswith('location:'):
                     u=urlsplit(line.split(':',1)[1].strip())
                     if re.fullmatch(r'(?:[a-z0-9-]+\.)*google\.[a-z.]+',u.hostname or '') and u.path.startswith('/sorry'):
-                        return 'CAPTCHA','browser TLS request redirected to Google CAPTCHA'
+                        return 'CAPTCHA','request redirected to Google CAPTCHA'
         if rc:return 'INCONCLUSIVE',f'page fetch failed: {err[-120:]}'
         # Fields are from the public, unauthenticated application page.
         bl=re.search(r'"cfb2h":"([^"\\]+)"',page)

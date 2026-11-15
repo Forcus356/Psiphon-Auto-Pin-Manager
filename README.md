@@ -6,7 +6,7 @@
 
 **Local SOCKS5 · automatic server PIN · Google/Gemini checks · recovery**
 
-![Version](https://img.shields.io/badge/version-4.3.1-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.2-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -60,6 +60,8 @@ These guides are available in seven languages. The console menu currently uses R
 <a id="menu"></a>
 
 ## Console Menu
+
+**Gemini CAPTCHA:** a redirect to Google's `/sorry/` page is recognized with both standard curl and the optional browser TLS profile. It is no longer mislabeled as missing session fields (`INCONCLUSIVE`). The monitor confirms the CAPTCHA response before searching another exit. Other genuinely inconclusive replies keep their existing policy; a verified PIN alone does not prove Gemini is serving.
 
 **Templates — quick setup:** choose **t** at the top of the main menu. On a clean VPS, Enter opens templates too. The three choices are **1 — Gemini: yes / YouTube: yes**, **2 — Gemini: yes / YouTube: no**, **3 — Gemini: no / YouTube: yes**.
 

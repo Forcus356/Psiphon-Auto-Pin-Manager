@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Forcus Psiphon Auto-Pin Manager v4.3.1
+# Forcus Psiphon Auto-Pin Manager v4.3.2
 # Author: https://github.com/Forcus356
 # Ubuntu/Debian x86_64
 autopin_install_main() {
@@ -52,7 +52,7 @@ import tempfile
 import time
 import unicodedata
 
-VERSION='4.3.1'
+VERSION='4.3.2'
 ROOT=Path('/')
 
 @dataclass(frozen=True)
@@ -880,7 +880,7 @@ if (( MENU_REQUESTED )); then
     # Keep the complete installer available for every instance in a template.
     # The menu owns child installs, so no child opens another menu or holds its lock.
     {
-        printf '#!/usr/bin/env bash\n# Forcus Auto-Pin offline installer v4.3.1\n'
+        printf '#!/usr/bin/env bash\n# Forcus Auto-Pin offline installer v4.3.2\n'
         declare -f autopin_install_main
         printf '\nautopin_install_main "$@"\n'
     } > "$menu_tmp/install_psiphon_autopin.sh"
@@ -1242,7 +1242,7 @@ for p in Path('/var/lib').glob('psiphon-autopin*/settings.json'):
 PORT_RESERVATIONS
 mkdir -p "$ROOT" "$CONF" "$APP" "$DATA"
 chmod 700 "$DATA"
-echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v4.3.1; backend=$BACKEND"
+echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v4.3.2; backend=$BACKEND"
 
 # Monitor is stopped after installation ownership checks below.
 
@@ -1480,7 +1480,7 @@ if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
     IMAGE=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER")
     NETMODE=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CONTAINER")
     MOUNT_OK=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Source}}{{end}}{{end}}' "$CONTAINER")
-    [[ ( $IMAGE == local-psiphon-console:latest || $IMAGE == local-psiphon-console:4.3.1 ) && $NETMODE == host && $MOUNT_OK == "$CONF" ]] || {
+    [[ ( $IMAGE == local-psiphon-console:latest || $IMAGE == local-psiphon-console:4.3.2 ) && $NETMODE == host && $MOUNT_OK == "$CONF" ]] || {
         echo '[ERROR] Existing container is not our console backend; no services changed.' >&2; exit 1;
     }
     [[ -f $CONF/psiphon.config ]] || { echo 'Missing console config' >&2; exit 1; }
@@ -1513,7 +1513,7 @@ cat > "$ROOT/.dockerignore" <<'DOCKER_IGNORE'
 !Dockerfile
 !ConsoleClient
 DOCKER_IGNORE
-docker build -t local-psiphon-console:4.3.1 "$ROOT"
+docker build -t local-psiphon-console:4.3.2 "$ROOT"
 if (( CONSOLE_EXISTS )); then
     OLD_PORT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("LocalSocksProxyPort"))' "$CONF/psiphon.config")
     if [[ $OLD_PORT != "$SOCKS_PORT" ]] && proxy_port_occupied; then echo 'New proxy port occupied' >&2; exit 1; fi
@@ -1534,7 +1534,7 @@ chown -R 1000:1000 "$CONF"
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" --restart unless-stopped --network host --user 1000:1000 \
     --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256 \
-    -v "$CONF:/config" local-psiphon-console:4.3.1 >/dev/null
+    -v "$CONF:/config" local-psiphon-console:4.3.2 >/dev/null
 fi # console backend
 
 python3 - "$DATA/settings.json" "$CONF/psiphon.config" "$DATA/state.json" "$YOUTUBE_MODE" <<'MODE_CHANGE'
@@ -1821,12 +1821,14 @@ def check(port, impersonate_dir=None, host="127.0.0.1"):
         page_common=common if not impersonate_dir else ['--noproxy','','--proxy',proxy,'-b',jar,'-c',jar]
         headers=Path(tmp)/'headers'
         rc,page,err=curl([*page_common,'-D',str(headers),APP],timeout=30,executable=page_binary)
-        if impersonate_dir and headers.exists():
+        # A plain curl request can be redirected to Google CAPTCHA too.
+        # Classify that explicit response before checking application session fields.
+        if headers.exists():
             for line in headers.read_text(errors='replace').splitlines():
                 if line.lower().startswith('location:'):
                     u=urlsplit(line.split(':',1)[1].strip())
                     if re.fullmatch(r'(?:[a-z0-9-]+\.)*google\.[a-z.]+',u.hostname or '') and u.path.startswith('/sorry'):
-                        return 'CAPTCHA','browser TLS request redirected to Google CAPTCHA'
+                        return 'CAPTCHA','request redirected to Google CAPTCHA'
         if rc:return 'INCONCLUSIVE',f'page fetch failed: {err[-120:]}'
         # Fields are from the public, unauthenticated application page.
         bl=re.search(r'"cfb2h":"([^"\\]+)"',page)
@@ -1858,7 +1860,7 @@ python3 -m py_compile "$APP/gemini_probe.py"
 
 cat > "$APP/psiphon_autopin.py" <<'PY_MANAGER'
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v4.3.1: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v4.3.2: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import contextlib
 import datetime as dt
@@ -2869,7 +2871,7 @@ write_menu_module > "$APP/autopin_menu.py"
 chmod 700 "$APP/autopin_menu.py"
 installer_tmp=$(mktemp "$APP/installer.XXXXXX")
 {
-    printf '#!/usr/bin/env bash\n# Forcus Auto-Pin offline installer v4.3.1\n'
+    printf '#!/usr/bin/env bash\n# Forcus Auto-Pin offline installer v4.3.2\n'
     declare -f autopin_install_main
     printf '\nautopin_install_main "$@"\n'
 } > "$installer_tmp"
@@ -2910,7 +2912,7 @@ TUNNEL_DEP=''
 if [[ $BACKEND == vps-psiphon ]]; then TUNNEL_DEP="$CONTAINER.service"; fi
 cat > "/etc/systemd/system/$MONITOR" <<EOF
 [Unit]
-Description=Forcus Psiphon Auto-Pin v4.3.1 server rotation and Google geo monitor
+Description=Forcus Psiphon Auto-Pin v4.3.2 server rotation and Google geo monitor
 Wants=network-online.target $TUNNEL_DEP
 After=network-online.target docker.service $TUNNEL_DEP
 Requires=docker.service
@@ -2968,7 +2970,7 @@ fi
 systemctl daemon-reload
 systemctl enable "$MONITOR"
 systemctl restart "$MONITOR"
-printf '\n[OK] Forcus Psiphon Auto-Pin v4.3.1 installed\n'
+printf '\n[OK] Forcus Psiphon Auto-Pin v4.3.2 installed\n'
 echo '[OK] Existing healthy unpinned exits are retained; targeted pinning remains available.'
 echo "[OK] Gemini checks: $GEMINI_CHECK; optional throughput sample: ${PROBE_MB} MiB; strict region: $STRICT_REGION."
 echo "[OK] SOCKS5h: $BIND:$SOCKS_PORT (Google and IP checks through proxy)."

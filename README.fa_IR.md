@@ -6,7 +6,7 @@
 
 **SOCKS5 محلی · تثبیت خودکار سرور · بررسی Google/Gemini · بازیابی**
 
-![Version](https://img.shields.io/badge/version-4.3.1-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.2-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -70,6 +70,8 @@ auto-pin
 <a id="menu"></a>
 
 ## منوی کنسول
+
+**Gemini CAPTCHA:** تغییر مسیر به صفحهٔ `/sorry/` گوگل هم با curl معمولی و هم با پروفایل TLS اختیاری مرورگر تشخیص داده می‌شود و دیگر به‌اشتباه نبود فیلدهای نشست (`INCONCLUSIVE`) گزارش نمی‌شود. مانیتور پس از تأیید دوبارهٔ CAPTCHA، خروجی دیگری جست‌وجو می‌کند. سیاست دیگر پاسخ‌های نامشخص تغییر نمی‌کند؛ تأیید PIN به‌تنهایی کارکرد Gemini را ثابت نمی‌کند.
 
 **قالب‌ها — راه‌اندازی سریع:** گزینهٔ **t** در بالای منوی اصلی است. در VPS تازه، Enter نیز قالب‌ها را باز می‌کند. سه انتخاب: **1 — Gemini: بله / YouTube: بله**، **2 — Gemini: بله / YouTube: خیر**، **3 — Gemini: خیر / YouTube: بله**.
 

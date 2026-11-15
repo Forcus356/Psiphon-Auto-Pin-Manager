@@ -6,7 +6,7 @@
 
 **Локальный SOCKS5 · автоматический PIN · Google/Gemini · восстановление**
 
-![Version](https://img.shields.io/badge/version-4.3.1-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.2-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -60,6 +60,8 @@ auto-pin
 <a id="menu"></a>
 
 ## Консольное меню
+
+**Gemini CAPTCHA:** перенаправление на страницу Google `/sorry/` распознаётся и с обычным curl, и с дополнительным TLS-профилем браузера. Оно больше не записывается как отсутствие полей сессии (`INCONCLUSIVE`). Монитор подтверждает CAPTCHA повторной проверкой и затем ищет другой выход. Остальные неопределённые ответы сохраняют прежнюю политику; проверенный PIN сам по себе не подтверждает работу Gemini.
 
 **Шаблоны — быстрый запуск:** верхний пункт **t** главного меню. На чистой VPS он также открывается по Enter. Доступны три варианта: **1 — Gemini: да / YouTube: да**, **2 — Gemini: да / YouTube: нет**, **3 — Gemini: нет / YouTube: да**.
 
