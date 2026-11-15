@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v4.3.2: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v4.4.0: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import contextlib
 import datetime as dt
@@ -27,6 +27,49 @@ STATE=DATA/'state.json'
 ENV_FILE=Path('/etc/default/vps-psiphon')
 INSTANCE=1
 POLICY={}
+
+def activity_report(status,detail='',**values):
+    """Public progress only; never include encoded server credentials."""
+    atomic_json(DATA/'activity.json',{'status':status,'detail':detail,
+        'checked_at':dt.datetime.now(dt.timezone.utc).isoformat(),**values})
+
+def view_instances():
+    result=[]
+    for path in DATA.parent.glob('psiphon-autopin*/settings.json'):
+        suffix=path.parent.name.removeprefix('psiphon-autopin')
+        if suffix and not re.fullmatch(r'-[2-9]|-[1-9][0-9]',suffix):continue
+        number=int(suffix[1:]) if suffix else 1
+        result.append(number)
+    return sorted(set(result))
+
+def view_config(number):
+    suffix='' if number==1 else '-'+str(number)
+    config=read_json(DATA.parent/('psiphon-autopin'+suffix)/'settings.json',{}) or {}
+    name='YouTube' if config.get('youtube_mode') else 'Gemini' if config.get('gemini_check') else 'Psiphon'
+    # settings contain user policy, not TargetServerEntry or datastore credentials.
+    return {'instance':number,'name':name,'settings':config}
+
+def all_views(args,targets):
+    results=[];failed=False
+    for number in targets:
+        named=view_config(number)
+        if args.command=='config':results.append(named);continue
+        command=[sys.executable,str(Path(__file__)),args.command]
+        if args.value is not None:command.append(args.value)
+        command+=['--instance',str(number)]
+        try:p=subprocess.run(command,capture_output=True,text=True,timeout=60)
+        except (OSError,subprocess.SubprocessError) as exc:p=subprocess.CompletedProcess(command,1,stdout='',stderr=str(exc))
+        failed=failed or bool(p.returncode)
+        if args.command in ('status','xray'):
+            try:value=json.loads(p.stdout)
+            except ValueError:value={'error':(p.stderr or p.stdout)[-500:]}
+            results.append({'instance':number,'name':named['name'],'result':value,'exit_code':p.returncode})
+        else:
+            print(f'===== Экземпляр {number} — {named["name"]} =====',flush=True)
+            print(p.stdout,end='',flush=True)
+            if p.stderr:print(p.stderr,file=sys.stderr,end='',flush=True)
+    if args.command in ('status','xray','config'):print(json.dumps(results,ensure_ascii=False,indent=2))
+    return 1 if failed else 0
 
 def configure_instance(number):
     global INSTANCE,BASE,DATA,CONFIG,CONTAINER,STATE,CACHE,ENV_FILE,PROXY
@@ -375,6 +418,7 @@ def adopt_current(region,gemini,mb,strict,observed=None,auto_pin=True):
         youtube_observation(ip,geo,verdict,speed,pin=True,diag=diag)
         log(f'RECOVERED VERIFIED PIN: exit={ip} Google={geo} Gemini={verdict} '
             f'server={row["server_ip"]} ID={diag}; no restart')
+        activity_report('VERIFIED','PIN проверен',gemini=verdict)
         return True
     atomic_json(STATE,{'region':region,'ip':ip,'google_region':geo,
         'diagnostic_id':diag,'server_ip':None,'gemini':verdict,
@@ -383,6 +427,7 @@ def adopt_current(region,gemini,mb,strict,observed=None,auto_pin=True):
     youtube_observation(ip,geo,verdict,speed,diag=diag)
     log(f'ADOPTED HEALTHY exit={ip} Google={geo} Gemini={verdict} ID={diag}; no restart (not targeted pin)')
     if auto_pin:auto_pin_current(region,gemini,mb,strict)
+    activity_report('VERIFIED','Выход проверен',gemini=verdict)
     return True
 
 def started_at():
@@ -552,6 +597,7 @@ def auto_pin_current(region,gemini=False,mb=0,strict=False,wait=None):
     except Exception as exc:log(f'PIN verified; reserve update deferred: {type(exc).__name__}')
     youtube_observation(ip,geo,verdict,speed,pin=True,diag=expected)
     log(f'INITIAL PIN VERIFIED: exit={ip} Google={geo} Gemini={verdict} ID={expected}; initial exit={initial_ip}')
+    activity_report('VERIFIED','PIN проверен',gemini=verdict)
     return True
 
 
@@ -573,10 +619,12 @@ def verify_pin_current(region,gemini=False,mb=0,strict=False):
     if ip==state['ip'] and not reason and not geo_reason(geo,region,strict) and not speed_reason(speed) and diag==state.get('diagnostic_id'):
         youtube_observation(ip,geo,verdict,speed,pin=True,diag=diag)
         log(f'Existing pin healthy: {ip}, {geo}, server={diag}')
+        activity_report('VERIFIED','PIN проверен',gemini=verdict)
         return True
     return False
 
 def search(region,wait,delay,gemini=False,mb=0,strict=False):
+    activity_report('SEARCHING','Поиск подходящего выхода')
     youtube_report('SEARCHING',detail='Searching for Google GeoIP RU')
     log(f'Server rotation started: {region or "AUTO"}; unlimited cycles')
     # A CLI region override must take effect before accepting the current exit.
@@ -615,6 +663,7 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
         for i,candidate in enumerate(candidates,1):
             server=candidate['server_ip'];expected=candidate['diagnostic']
             log(f'Trying server {i}/{len(candidates)}: {server}, ID={expected}')
+            activity_report('SEARCHING',f'Кандидат {i}/{len(candidates)}, цикл {cycle}',candidate=i,total=len(candidates),cycle=cycle)
             try:
                 apply_candidate(candidate,region)
                 exit_ip=docker_restart(wait)
@@ -630,6 +679,7 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
                 reason=reason or speed_reason(speed)
                 if reason:
                     seen_exits.add(first)
+                    activity_report('SEARCHING',f'Кандидат {i}/{len(candidates)} отклонён: {reason}',gemini=verdict)
                     log(f'Rejected exit {first}: {reason}')
                     continue
                 # Recheck IP/geo, without an unnecessary second Gemini request.
@@ -643,9 +693,11 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
                 remember_pin(candidate,region)
                 youtube_observation(first,geo2,verdict,speed,pin=True,diag=expected)
                 log(f'PIN VERIFIED: exit={first} Google={geo2} Gemini={verdict} server={server} ID={expected}')
+                activity_report('VERIFIED','PIN проверен',gemini=verdict)
                 return True
             except Exception as exc:
                 youtube_report('UNKNOWN' if isinstance(exc,GoogleGeoUnknown) else 'DEGRADED',detail=str(exc))
+                activity_report('SEARCHING',f'Кандидат {i}/{len(candidates)} недоступен; поиск продолжается')
                 log(f'Server {server} failed: {exc}')
             finally:
                 time.sleep(delay)
@@ -658,6 +710,7 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
         seen_exits.clear()
 
 def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
+    activity_report('CHECKING','Ожидание проверки текущего запуска')
     log(f'Monitor v4.3: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
     youtube_report('UNKNOWN',detail='Waiting for startup verification')
     failures=0;slow_count=0;slow_identity=None
@@ -718,6 +771,7 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
                     state.update(google_region=geo, gemini=verdict, speed_kib_s=speed,
                                  verified_at=dt.datetime.now(dt.timezone.utc).isoformat())
                     atomic_json(STATE,state)
+                    activity_report('VERIFIED','Проверка выхода завершена',gemini=verdict)
                 if state.get('adopted_unpinned') and not config.get('TargetServerEntry'):
                     if auto_pin_current(region,gemini,mb,strict,wait):
                         failures=0;time.sleep(interval);continue
@@ -832,9 +886,10 @@ def uninstall(purge_deps=False):
 
 def main():
     ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v4.3')
-    ap.add_argument('command',choices=['menu','check','search','monitor','status','refresh-cache','prepare-pin','set-region','set-pool','region','pool','rotate','start','stop','restart','logs','speed','uninstall','xray','xray-routing','update'])
+    ap.add_argument('command',choices=['menu','check','search','monitor','status','config','refresh-cache','prepare-pin','set-region','set-pool','region','pool','rotate','start','stop','restart','logs','speed','uninstall','xray','xray-routing','update'])
     ap.add_argument('value',nargs='?')
     ap.add_argument('--instance',type=int,default=1)
+    ap.add_argument('--all',action='store_true',help='Read-only status, logs, config or xray for all installed instances')
     ap.add_argument('--youtube-instance',type=int,default=1)
     ap.add_argument('--gemini-instance',type=int,default=2)
     ap.add_argument('--purge-deps',action='store_true',help='With uninstall: remove only Docker/Go installed by Auto-Pin and no longer used')
@@ -857,6 +912,17 @@ def main():
     ap.add_argument('--no-strict-region',dest='strict_region',action='store_false')
     ap.add_argument('--fail-threshold',type=int,default=None)
     args=ap.parse_args()
+    if args.all and args.command not in ('status','logs','config','xray'):ap.error('--all supports status, logs, config or xray only')
+    if args.all:return all_views(args,view_instances())
+    implicit_view=args.command in ('status','logs','config','xray') and sys.stdin.isatty() and sys.stdout.isatty() and not any(v=='--instance' or v.startswith('--instance=') for v in sys.argv[1:])
+    if implicit_view and len(view_instances())==1:args.instance=view_instances()[0]
+    if implicit_view and len(view_instances())>1:
+        import autopin_menu as ui
+        try:
+            with open('/dev/tty','r',encoding='utf-8',errors='replace') as reader,open('/dev/tty','w',encoding='utf-8',buffering=1) as writer:
+                targets=ui.Menu(ui.TerminalIO(reader,writer)).view_targets(args.command)
+            return all_views(args,targets) if targets else 0
+        except (EOFError,KeyboardInterrupt):return 0
     if args.purge_deps and args.command!='uninstall':ap.error('--purge-deps requires uninstall')
     force_rotate=(args.command=='rotate')
     if not 1<=args.instance<=99:ap.error('instance must be 1..99')
@@ -905,7 +971,7 @@ def main():
     if not 0<=args.probe_mb<=10 or not 2<=args.fail_threshold<=20:ap.error('probe-mb 0..10, fail-threshold 2..20')
     if args.command=='xray-routing':
         print(json.dumps(xray_routing(args.youtube_instance,args.gemini_instance),indent=2));return 0
-    if args.command not in ('status','logs','uninstall','stop','xray') and youtube_enabled():
+    if args.command not in ('status','logs','config','uninstall','stop','xray') and youtube_enabled():
         if args.gemini_check:ap.error('YouTube and Gemini require separate instances; use --no-gemini-check on the YouTube instance')
         if int(settings.get('tunnel_pool',1))!=1:ap.error('YouTube requires --tunnel-pool 1')
         if not ipaddress.ip_address(bind).is_loopback:ap.error('YouTube requires loopback binding')
@@ -913,6 +979,8 @@ def main():
         print(json.dumps({'instance':INSTANCE,'youtube_mode':youtube_enabled(),'youtube':youtube_status(POLICY),'region_pool':POLICY.get('region_pool',[]),'min_speed_kib':POLICY.get('min_speed_kib',0),'slow_threshold':POLICY.get('slow_threshold',2),'deny_regions':POLICY.get('deny_regions',['RU']),'impersonate':POLICY.get('impersonate',False),'backend':backend(),'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
     if args.command=='xray':
         print(json.dumps({'tag':'psiphon-out'+('' if INSTANCE==1 else f'-{INSTANCE}'),'protocol':'socks','settings':{'servers':[{'address':bind,'port':port}]}},indent=2));return 0
+    if args.command=='config':
+        print(json.dumps(view_config(INSTANCE),ensure_ascii=False,indent=2));return 0
     if args.command=='uninstall':uninstall(args.purge_deps);return 0
     if args.command=='logs':
         return subprocess.call(['journalctl','-u',monitor_unit(),'-u',CONTAINER+'.service','-n',args.value or '50','--no-pager'])

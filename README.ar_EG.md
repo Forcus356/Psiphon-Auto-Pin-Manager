@@ -6,7 +6,7 @@
 
 **SOCKS5 محلي · تثبيت تلقائي للخادم · فحص Google/Gemini · استعادة الاتصال**
 
-![Version](https://img.shields.io/badge/version-4.3.2-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.4.0-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -70,6 +70,24 @@ auto-pin
 <a id="menu"></a>
 
 ## قائمة الطرفية
+
+**عرض جميع المثيلات (4.4):** تعرض القائمة الرئيسية كل مثيل في قسم مستقل. المثيلات ذات أصل قالب محفوظ تظهر في «القوالب»، والباقي في «مثيلاتك». لكل قسم اسم Gemini / YouTube / Psiphon ورقم ومنافذ وخدمات وتشغيل تلقائي ومنطقة وPIN ونتائج وسرعة وwatchdog وإصدار مستقل. لا تُعرض حالة تعطيل خدمة أخرى. `r` يحدّث الجميع، و4 يختار المثيل المراد تعديله.
+
+لا تظهر نتيجة YouTube RU/PIN الصالحة كبحث بسبب غياب state.json العادي. نتائج Gemini السابقة لإعادة التشغيل تُسمى سابقة بوضوح. INCONCLUSIVE لا يعني SERVING وقد يستغرق بحث RU وقتًا.
+
+عند تعدد المثيلات، يُطلب أولًا رقم أو **a — الجميع** لعرض الحالة أو السجلات أو Xray JSON أو الإعدادات المحفوظة، مع تسمية كل نتيجة. خيار الإدارة **15** يعرض السياسة والاتصال دون TargetServerEntry السري. فحوص الاتصال والسرعة تدعم الاختيار أيضًا. التحديث 5 يتيح واحدًا أو الجميع بالتتابع مع تأكيد منفصل وبيان الفشل الجزئي.
+
+تحفظ القوالب الجديدة أصلها. الإصدارات القديمة لم تفعل؛ استخدم **t → g** وأرقامًا مثل `1,2` ثم التأكيد لتغيير التجميع فقط دون السياسة أو الخدمات. تتبع الأسماء الإعدادات الحالية.
+
+أوامر العرض التفاعلية دون --instance صريح تسأل عن النطاق. تحافظ الأتمتة غير التفاعلية على الافتراضي القديم؛ --instance N يتجاوز السؤال و--all يجمع status أو logs أو config أو xray. لا يدعم --all الحذف أو الإيقاف.
+
+```bash
+psiphon-autopin status --all
+psiphon-autopin logs 50 --all
+psiphon-autopin config --all
+psiphon-autopin xray --all
+psiphon-autopin status --instance 2
+```
 
 **Gemini CAPTCHA:** يُكتشف التحويل إلى صفحة Google `/sorry/` مع curl العادي ومع ملف TLS الاختياري للمتصفح. لم يعد يُصنف خطأً كغياب حقول الجلسة (`INCONCLUSIVE`). تؤكد المراقبة استجابة CAPTCHA بفحص ثانٍ قبل البحث عن مخرج آخر. تبقى سياسة الردود غير الحاسمة الأخرى كما هي؛ تأكيد PIN وحده لا يثبت عمل Gemini.
 
@@ -203,6 +221,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-M
 | `psiphon-autopin update` | التحديث من auto-pin. |
 | `auto-pin` | فتح قائمة الإعداد والإدارة. |
 | `auto-pin --instance 2` | فتح قائمة النسخة 2. |
+| `psiphon-autopin config` | عرض سياسة المستخدم والاتصال المحفوظين دون بيانات اعتماد الخادم. |
 | `psiphon-autopin status` | عرض الإعدادات المحفوظة وآخر نتيجة. |
 | `psiphon-autopin check` | إجراء فحص جديد للاتصال والسياسات. |
 | `psiphon-autopin rotate` | طلب تبديل الخادم. |
@@ -215,7 +234,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-M
 | `psiphon-autopin stop` | إيقاف النسخة المحددة. |
 | `psiphon-autopin restart` | إعادة تشغيل النسخة المحددة. |
 | `psiphon-autopin xray` | طباعة SOCKS outbound JSON لـXray. |
-| `psiphon-autopin-2 status` | عرض حالة النسخة 2. |
+| `psiphon-autopin-2 status --instance 2` | عرض حالة النسخة 2. |
 | `psiphon-autopin menu` | فتح القائمة من واجهة الأوامر الأصلية. |
 | `vps-psiphon status` | اسم بديل متوافق للمدير نفسه. |
 | `psiphon-autopin refresh-cache --allow-interruption` | تحديث ذاكرة قاعدة البيانات؛ يقطع النفق. |
@@ -380,7 +399,7 @@ psiphon-autopin xray
 
 ### التحديث من auto-pin
 
-البند **5 — Update Auto-Pin (GitHub)** يحدّث النسخة المثبّتة المختارة مع حفظ إعداداتها. لا تتغير النسخ الأخرى؛ اخترها من البند 4 لتحديثها. يثبت main على commit محدد ويفحص Git blob وصياغة Bash ويعرض الإصدار/commit/SHA-256 قبل طلب التأكيد. لا يُشغّل المثبّت عند خطأ الشبكة أو التحقق، ويُرفض الرجوع لإصدار أقدم. بعد النجاح تُفتح القائمة الرئيسية المحدّثة تلقائيًا.
+الخيار **5 — تحديث Auto-Pin (GitHub)** يتيح مثيلًا واحدًا أو **a — الجميع**. يحفظ إعدادات كل مثيل ويحدّث بالتتابع مع تأكيد منفصل وإبلاغ دقيق بالنتيجة الجزئية. يثبت commit من main ويتحقق من Git blob وصياغة Bash، ويعرض الإصدار وcommit وSHA-256. لا تشغّل أخطاء الشبكة/التحقق المثبّت ويُرفض الرجوع لإصدار أقدم. يفتح النجاح القائمة الجديدة.
 
 تفتح هذه الأوامر نفس إجراء التحديث المؤكد. تتاح الوظيفة بعد التثبيت الأول لهذا الإصدار؛ انشر جميع ملفات الإصدار في مستودعك قبل استخدامها.
 

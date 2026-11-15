@@ -6,7 +6,7 @@
 
 **本地 SOCKS5 · 自动固定服务器 · Google/Gemini 检查 · 自动恢复**
 
-![Version](https://img.shields.io/badge/version-4.3.2-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.4.0-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -60,6 +60,24 @@ auto-pin
 <a id="menu"></a>
 
 ## 控制台菜单
+
+**全部实例概览（4.4）：**主菜单同时显示每个实例的独立状态。有模板来源记录的实例归入“模板”，其他归入“你的实例”。每个区块显示自己的 Gemini / YouTube / Psiphon 名称、编号、端口、服务、自启动、地区、PIN、检查结果、速度、watchdog 和版本，不再显示其他服务的禁用状态。`r` 刷新全部；选项 4 仅选择要编辑的实例。
+
+有效的 YouTube RU/PIN 结果不会因普通 state.json 缺失而显示搜索中。重启前的 Gemini 结果明确标为历史结果。INCONCLUSIVE 不代表 SERVING，搜索 RU 可能需要时间。
+
+多个实例时，查看状态、日志、Xray JSON 或已保存配置会先询问编号或 **a — 全部**，各项输出均有名称。管理选项 **15** 显示策略和连接参数，不泄露 TargetServerEntry。连接和速度检查也可选择目标。更新选项 5 可依次更新一个或全部实例，每个实例分别确认，并准确报告部分失败。
+
+新模板自动保存来源。旧版本没有来源记录，可通过 **t → g** 输入如 `1,2` 并确认分组；不修改策略或服务。实例名称随当前配置变化。
+
+交互式查看命令未明确指定 --instance 时也会询问范围。非交互自动化保留原默认实例；--instance N 跳过询问，--all 汇总 status、logs、config 或 xray。--all 不支持删除或停止。
+
+```bash
+psiphon-autopin status --all
+psiphon-autopin logs 50 --all
+psiphon-autopin config --all
+psiphon-autopin xray --all
+psiphon-autopin status --instance 2
+```
 
 **Gemini CAPTCHA：**标准 curl 和可选的浏览器 TLS 配置均可识别 Google `/sorry/` 页面重定向，不再将其误判为缺少会话字段（`INCONCLUSIVE`）。监控程序复查确认 CAPTCHA 后搜索其他出口。其他无法确定的响应保留现有策略；PIN 验证成功本身并不证明 Gemini 可用。
 
@@ -165,6 +183,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-M
 | `psiphon-autopin update` | 通过 auto-pin 更新. |
 | `auto-pin` | 打开设置和维护菜单。 |
 | `auto-pin --instance 2` | 打开实例 2 的菜单。 |
+| `psiphon-autopin config` | 显示已保存的用户策略和连接设置，不含服务器凭据。 |
 | `psiphon-autopin status` | 显示已保存配置和最近结果。 |
 | `psiphon-autopin check` | 重新检查连接及策略。 |
 | `psiphon-autopin rotate` | 请求轮换服务器。 |
@@ -177,7 +196,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-M
 | `psiphon-autopin stop` | 停止所选实例。 |
 | `psiphon-autopin restart` | 重启所选实例。 |
 | `psiphon-autopin xray` | 输出 Xray SOCKS outbound JSON。 |
-| `psiphon-autopin-2 status` | 显示实例 2 的状态。 |
+| `psiphon-autopin-2 status --instance 2` | 显示实例 2 的状态。 |
 | `psiphon-autopin menu` | 通过原 CLI 打开菜单。 |
 | `vps-psiphon status` | 同一管理器的兼容别名。 |
 | `psiphon-autopin refresh-cache --allow-interruption` | 刷新数据库缓存；会中断隧道。 |
@@ -314,7 +333,7 @@ Xray 位于 Docker bridge 网络时，127.0.0.1 指向 Xray 容器自身。请�
 
 ### 通过 auto-pin 更新
 
-主菜单第 **5 项 — Update Auto-Pin (GitHub)** 更新所选已安装实例并保留其设置。不会更改其他实例，可通过第 4 项选择后分别更新。更新器将 main 解析为固定提交，核验 Git blob 和 Bash 语法，显示版本、提交、SHA-256 后请求确认。网络或校验失败时不执行安装器，拒绝降级。成功后自动打开更新后的主菜单。
+主菜单 **5 — 更新 Auto-Pin（GitHub）**先选择一个实例或 **a — 全部**。保留各实例设置，依次更新并分别确认，准确报告部分成功。更新器解析 main 的固定提交，验证 Git blob 和 Bash 语法，显示版本、提交和 SHA-256。网络或验证失败不执行安装器，禁止降级。成功后打开新主菜单。
 
 这些命令进入相同的确认更新流程。首次安装此版本后才有该功能；使用前请先将此版本全部文件发布到自己的仓库。
 

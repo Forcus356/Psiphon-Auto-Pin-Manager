@@ -20,8 +20,9 @@ import sys
 import tempfile
 import time
 import unicodedata
+import uuid
 
-VERSION='4.3.2'
+VERSION='4.4.0'
 ROOT=Path('/')
 
 @dataclass(frozen=True)
@@ -171,6 +172,25 @@ TEMPLATES={
 
 def mode_label(config):
     return 'YouTube' if config['youtube_mode'] else 'Gemini' if config['gemini_check'] else 'Psiphon'
+
+def instance_origin(number):
+    try:
+        value=json.loads((paths(number)['data']/'origin.json').read_text())
+        if isinstance(value,dict) and value.get('source')=='template' and isinstance(value.get('group'),str):return value
+    except (OSError,ValueError):pass
+    return {}
+
+def instance_label(number):
+    try:config=load_config(number)
+    except (ValueError,OSError,TypeError):return f'Экземпляр {number} — настройки недоступны'
+    return f'Экземпляр {number} — {mode_label(config)}, SOCKS {config["port"]}'
+
+def mark_template(numbers,group=None):
+    group=group or uuid.uuid4().hex
+    for number in numbers:
+        config=load_config(number)
+        atomic_json(paths(number)['data']/'origin.json',{'source':'template','group':group,
+            'role':mode_label(config),'marked_at':dt.datetime.now(dt.timezone.utc).isoformat()})
 
 def proxy_ports(config):
     return {config['port'],config['port']+1} if config['publish_http'] else {config['port']}
@@ -449,23 +469,76 @@ class Menu:
         text=self.ask(prompt)
         self._field_entered=bool(text)
         return parse_field(field,text) if text else value
+    def overview(self):
+        numbers=discover()
+        if not numbers:
+            self.footer();return
+        self.say('Состояние всех установленных экземпляров. Настройки меняются только у выбранного: '+str(self.instance)+'. Пункт 4 — выбрать другой.')
+        for title,items in [('====== Шаблоны ======',[n for n in numbers if instance_origin(n)]),
+                            ('====== Ваши экземпляры ======',[n for n in numbers if not instance_origin(n)])]:
+            if not items:continue
+            self.say(self.style.info(title,'cyan'))
+            for number in items:
+                try:self.say(instance_label(number))
+                except (ValueError,OSError,TypeError) as exc:self.say(f'Экземпляр {number}: ошибка настроек — '+safe_text(str(exc)))
+            for number in items:
+                try:self.footer(number,overview=True)
+                except (ValueError,OSError,TypeError) as exc:self.say(f'Экземпляр {number}: состояние недоступно — '+safe_text(str(exc)))
+    def view_targets(self,label,allow_all=True):
+        numbers=discover()
+        if len(numbers)<=1:return numbers
+        rows=[instance_label(n)+(' · шаблон' if instance_origin(n) else ' · свой экземпляр') for n in numbers]
+        self.panel(label+' · выбрать экземпляр',[('',rows+(['a. Все экземпляры'] if allow_all else [])+['0. Отмена'])])
+        while True:
+            answer=self.ask('Номер экземпляра'+(' или a — все' if allow_all else '')+' [0 — отмена]: ').lower()
+            if answer=='0':return []
+            if allow_all and answer in ('a','all','все'):return numbers
+            try:
+                number=valid_instance(answer)
+                if number in numbers:return [number]
+            except (ValueError,TypeError):pass
+            self.say('Выберите установленный экземпляр из списка'+(' или a для всех.' if allow_all else '.'))
+    def group_existing(self):
+        numbers=discover()
+        self.say('Для старых версий без отметки шаблона можно указать происхождение вручную. Настройки и службы не меняются.')
+        for number in numbers:self.say(instance_label(number))
+        try:
+            answer=self.ask('Номера экземпляров одного шаблона через запятую [0 — отмена]: ')
+            if answer=='0':return False
+            selected=list(dict.fromkeys(valid_instance(v.strip()) for v in answer.split(',')))
+            if not selected or any(n not in numbers for n in selected):raise ValueError('Нужны номера установленных экземпляров')
+            if not self.confirm('Показать выбранные экземпляры в разделе «Шаблоны»?'):return False
+            mark_template(selected);self.say('Группировка сохранена. Политики, порты и службы не изменены.');return False
+        except (ValueError,OSError) as exc:self.say('Группировка: '+str(exc));return False
     def panel(self,title,sections):
         self.say('\n'+self.style.box(title,sections))
-    def footer(self):
-        saved=load_config(self.instance);installed=paths(self.instance)['manager'].is_file()
-        state=read_state(self.instance)
-        key=(self.instance,saved['backend'])
+    def footer(self,instance=None,overview=False):
+        number=self.instance if instance is None else instance
+        saved=load_config(number);installed=paths(number)['manager'].is_file()
+        state=read_state(number)
+        key=(number,saved['backend'])
         if installed:
             if self._status_cache is None or self._status_cache[0]!=key or time.monotonic()-self._status_cache[1]>2:
-                self._status_cache=(key,time.monotonic(),runtime_status(self.instance,saved['backend']))
+                self._status_cache=(key,time.monotonic(),runtime_status(number,saved['backend']))
             status=self._status_cache[2]
         else:status={name:{'state':'not-found','autostart':'unknown'} for name in ('tunnel','monitor')}
+        activity={}
+        try:
+            activity=json.loads((paths(number)['data']/'activity.json').read_text())
+            if not isinstance(activity,dict):activity={}
+        except (OSError,ValueError):pass
+        searching=False
+        try:
+            searching=activity.get('status')=='SEARCHING' and status['monitor']['state']=='active' and dt.datetime.fromisoformat(activity['checked_at'])>=dt.datetime.fromisoformat(status['tunnel']['started_at'].replace('Z','+00:00'))
+        except (KeyError,ValueError,TypeError):pass
         fresh=False
         try:
             last=dt.datetime.fromisoformat(state['verified_at'].replace('Z','+00:00'))
             began=dt.datetime.fromisoformat(status['tunnel']['started_at'].replace('Z','+00:00'))
             fresh=status['tunnel']['state']=='active' and last>=began
         except (KeyError,ValueError,TypeError,AttributeError):pass
+        if searching:fresh=False
+        self.say(self.style.info('--------- '+mode_label(saved)+' · экземпляр '+str(number)+' ---------','cyan'))
         tunnel,tone=status_label(status['tunnel']['state']);monitor,monitor_tone=status_label(status['monitor']['state'])
         combined='green' if tone==monitor_tone=='green' else 'red' if 'red' in (tone,monitor_tone) else 'yellow'
         self.say(self.style.info('Туннель: '+tunnel+'  ·  Монитор: '+monitor,combined))
@@ -480,13 +553,19 @@ class Menu:
         if state:
             self.say(self.style.info('Последний IP: '+str(state.get('ip') or 'нет данных')+'  ·  Google: '+str(state.get('google_region') or 'неизвестно')))
         gemini=str(state.get('gemini') or 'нет проверки') if saved['gemini_check'] else 'выключен'
-        self.say(self.style.info('Gemini: '+gemini,'green' if gemini=='SERVING' else 'red' if gemini in ('REFUSED','CAPTCHA') else 'normal'))
+        if saved['gemini_check'] or not overview:
+            if saved['gemini_check'] and not fresh:
+                self.say(self.style.info('Gemini: проверка / поиск IP; ответ модели ещё не подтверждён','yellow'))
+                if state.get('gemini'):self.say(self.style.info('Предыдущий результат Gemini: '+gemini))
+            else:
+                self.say(self.style.info('Gemini: '+gemini,'green' if gemini=='SERVING' else 'red' if gemini in ('REFUSED','CAPTCHA') else 'yellow' if saved['gemini_check'] else 'normal'))
+                if saved['gemini_check'] and gemini=='INCONCLUSIVE':self.say(self.style.info('Ответ модели Gemini не подтверждён; PIN подтверждает только закрепление сервера.','yellow'))
         if state.get('verified_at'):
             verified=str(state['verified_at'])
-            try:verified=dt.datetime.fromisoformat(verified.replace('Z','+00:00')).strftime('%d.%m.%Y %H:%M:%S %Z').strip()
+            try:verified=dt.datetime.fromisoformat(verified.replace('Z','+00:00')).astimezone(dt.timezone.utc).strftime('%d.%m.%Y %H:%M:%S UTC')
             except ValueError:pass
             self.say(self.style.info('Последняя проверка: '+verified))
-        yt_path=paths(self.instance)['data']/'youtube-status.json'
+        yt_path=paths(number)['data']/'youtube-status.json'
         yt={}
         if saved['youtube_mode']:
             try:yt=json.loads(yt_path.read_text())
@@ -497,18 +576,22 @@ class Menu:
                 if not 0<=age<=max(600,2*saved['interval']) or yt.get('boot_id')!=boot or (yt.get('status') in ('RU VERIFIED','PIN VERIFIED') and yt.get('container_started_at')!=status['tunnel'].get('started_at')):yt['status']='UNKNOWN'
             except (KeyError,ValueError,TypeError,OSError):yt['status']='UNKNOWN'
         label=yt.get('status','UNKNOWN') if saved['youtube_mode'] else 'DISABLED'
-        self.say(self.style.info('YouTube Mode: '+label,'green' if label in ('RU VERIFIED','PIN VERIFIED') else 'yellow' if saved['youtube_mode'] else 'normal'))
+        if saved['youtube_mode'] or not overview:
+            self.say(self.style.info('YouTube Mode: '+label,'green' if label in ('RU VERIFIED','PIN VERIFIED') else 'yellow' if saved['youtube_mode'] else 'normal'))
         if saved['youtube_mode']:
             self.say(self.style.info('Последний YouTube IP: '+str(yt.get('ip') or 'нет данных')+' · Google: '+str(yt.get('google_region') or 'UNKNOWN')))
             self.say(self.style.info('ID: '+str(yt.get('diagnostic_id') or 'нет данных')+' · Скорость: '+str(yt.get('speed_kib_s') if yt.get('speed_kib_s') is not None else 'нет данных')+' KiB/s'))
             self.say(self.style.info('Последняя успешная RU-проверка: '+str(yt.get('last_success_at') or 'нет данных')))
+        if searching:
+            self.say(self.style.info('Поиск: '+str(activity.get('detail') or 'подбор подходящего выхода'),'yellow'))
         self.say(self.style.info('Watchdog: интервал '+watchdog_period(saved['interval'])))
         output='SOCKS5' if saved['connection_type']=='socks5' else 'Xray JSON'
-        current=installed_version(self.instance) if installed else VERSION
+        current=installed_version(number) if installed else VERSION
         ui='' if current==VERSION else ' · Меню: v'+VERSION
         self.say(self.style.info('Скрипт: v'+current+ui+'  ·  Формат: '+output,'cyan'))
-        dirty=any(self.config.get(f.key)!=saved.get(f.key) for f in FIELDS)
-        if installed and not fresh:
+        dirty=number==self.instance and any(self.config.get(f.key)!=saved.get(f.key) for f in FIELDS)
+        ready=fresh if not saved['youtube_mode'] else label in ('RU VERIFIED','PIN VERIFIED') and status['tunnel']['state']=='active' and status['monitor']['state']=='active'
+        if installed and not ready:
             waiting=status['monitor']['state'] in ('active','activating')
             self.say(self.style.info('Проверка / поиск IP выполняется; результат ещё не подтверждён.' if waiting else 'Нет подтверждённого результата для текущего запуска.','yellow'))
         if dirty:self.say(self.style.info('Есть изменения, ещё не применены.','yellow'))
@@ -550,12 +633,13 @@ class Menu:
     def templates(self):
         self.panel('Шаблоны · быстрый запуск',[
             ('ВЫБЕРИТЕ ЧТО ЗАПУСТИТЬ',[f'{key}. {label}' for key,(label,_) in TEMPLATES.items()]),
-            ('',['0. Назад'])])
+            ('',['g. Отметить существующие экземпляры как шаблон','0. Назад'])])
         self.say('Вариант 1 запускает оба режима одновременно: два экземпляра, два разных SOCKS-порта.')
         self.say('Шаблоны создают новые экземпляры. Уже установленные экземпляры продолжают работать без изменений.')
         while True:
-            choice=self.ask('Выберите шаблон [1 / 2 / 3; 0 — назад]: ')
+            choice=self.ask('Выберите шаблон [1 / 2 / 3; g — группировка; 0 — назад]: ').lower()
             if choice=='0':return False
+            if choice=='g':return self.group_existing()
             if choice in TEMPLATES:break
             self.say('Введите номер: 1, 2, 3 или 0.')
         try:plan=template_plan(choice,self.instance)
@@ -594,7 +678,7 @@ class Menu:
         self.say('Установка выполняется по очереди. После неё оба монитора работают одновременно и ищут свои выходы в фоне.' if len(plan)>1 else 'После установки монитор ищет и проверяет подходящий выход в фоне.')
         if not self.confirm('Установить выбранный шаблон?'):
             self.say('Отменено; файлы и службы не изменены.');return False
-        completed=[]
+        completed=[];group=uuid.uuid4().hex
         try:
             validate_template_plan(plan)
             args=[build_args(config) for config in plan]
@@ -606,6 +690,7 @@ class Menu:
                 result=subprocess.run(['bash',str(installer),*argv],env={**os.environ,'AUTOPIN_MENU_PARENT':'1','AUTOPIN_CREATE_ONLY':'1'})
                 if result.returncode:raise RuntimeError(f'{mode_label(config)}: установщик завершился с кодом {result.returncode}; проверьте журналы')
                 completed.append(config)
+                mark_template([config['instance']],group)
                 self.instance=completed[0]['instance'];self.config=load_config(self.instance);self._status_cache=None;self._speed_edited=False
                 self.say(f'{mode_label(config)} · экземпляр {config["instance"]}: установка завершена; подтверждение выхода выполняется монитором.')
         except (ValueError,OSError,RuntimeError) as exc:
@@ -709,6 +794,22 @@ class Menu:
         except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:
             self.say('Обновление: '+safe_text(str(exc)));return False
 
+    def update_selected(self):
+        targets=self.view_targets('Обновление')
+        if not targets:return False
+        done=[]
+        for number in targets:
+            self.instance=number;self.config=load_config(number);self._status_cache=None
+            self.say('Обновление: '+instance_label(number))
+            if not self.update():
+                self.say('Обновление '+str(number)+' не подтверждено. Остальные ещё не выбранные экземпляры не обновлялись.')
+                break
+            done.append(number)
+        if done:
+            self.instance=done[-1];self.config=load_config(self.instance)
+            self.say('Обновлены экземпляры: '+', '.join(map(str,done)))
+        return bool(done)
+
     def reopen(self):
         self.say('Открываю главное меню обновлённого экземпляра...')
         os.execv(sys.executable,[sys.executable,str(paths(self.instance)['app']/'autopin_menu.py'),'--instance',str(self.instance)])
@@ -722,7 +823,8 @@ class Menu:
             self.say('JSON: '+str(paths(self.instance)['data']/'xray-outbound.json'))
             self.say('Добавьте outbound и маршрутизацию в Xray. Его процесс должен иметь доступ к указанному адресу VPS.')
     def select_instance(self):
-        self.say('Установлены: '+(', '.join(map(str,discover())) or 'нет'))
+        self.say('Выбор экземпляра для настройки:')
+        for number in discover():self.say(instance_label(number))
         try:
             value=valid_instance(self.ask('Номер экземпляра 1–99 (существующий или новый): '))
             config=load_config(value)
@@ -734,11 +836,12 @@ class Menu:
         actions=[('Статус','status'),('Проверить соединение','check'),('Запустить','start'),
             ('Остановить','stop'),('Перезапустить','restart'),('Сменить сервер / ротация','rotate'),
             ('Поиск сервера / PIN','search'),('Показать журналы','logs'),('Измерить скорость','speed'),('Показать Xray JSON','xray'),
-            ('Подготовить PIN','prepare-pin'),('Обновить кэш серверов','refresh-cache'),('Удалить этот экземпляр','uninstall'),('Удалить + принадлежащие скрипту Docker/Go','purge')]
+            ('Подготовить PIN','prepare-pin'),('Обновить кэш серверов','refresh-cache'),('Удалить этот экземпляр','uninstall'),('Удалить + принадлежащие скрипту Docker/Go','purge'),('Показать сохранённые настройки / конфиг','config')]
         self.panel('Управление · экземпляр '+str(self.instance),[
             ('СОСТОЯНИЕ И СЛУЖБЫ',[f'{index+1:2}. {label}' for index,(label,_) in enumerate(actions) if index<5]),
             ('ДИАГНОСТИКА И СЕРВЕРЫ',[f'{index+1:2}. {label}' for index,(label,_) in enumerate(actions) if 5<=index<12]),
-            ('УДАЛЕНИЕ',[f'{index+1:2}. {label}' for index,(label,_) in enumerate(actions) if index>=12]+['0. Назад'])])
+            ('КОНФИГУРАЦИЯ',['15. Показать сохранённые настройки / конфиг']),
+            ('УДАЛЕНИЕ',[f'{index+1:2}. {label}' for index,(label,_) in enumerate(actions) if 12<=index<14]+['0. Назад'])])
         self.footer();answer=self.ask('Выбор: ')
         if answer=='0':return False
         try:
@@ -746,6 +849,10 @@ class Menu:
             if not 1<=index<=len(actions):raise ValueError
         except ValueError:self.say('Выберите номер из меню.');return False
         label,command=actions[index-1];extra=[]
+        if command in ('status','logs','xray','config','check','speed'):
+            targets=self.view_targets(label)
+            if not targets:return False
+        else:targets=[self.instance]
         if command=='logs':
             raw=self.ask('Строк журнала [50]: ')
             try:count=int(raw or '50');assert 1<=count<=10000
@@ -761,10 +868,20 @@ class Menu:
             self.say(warning)
             if not self.confirm(label+'?'):return False
         try:
-            result=subprocess.run([sys.executable,str(manager),command,*extra,'--instance',str(self.instance)])
+            result=None
+            for number in targets:
+                self.say('\n===== '+instance_label(number)+' · '+label+' =====')
+                target=paths(number)['manager']
+                if not target.is_file():self.say('Менеджер экземпляра отсутствует.');continue
+                # Read-only config is rendered by the current UI, including for old managers.
+                if command=='config':
+                    self.say(json.dumps({'instance':number,'name':mode_label(load_config(number)),'origin':instance_origin(number),
+                        'settings':load_config(number),'connection':connection(load_config(number))},ensure_ascii=False,indent=2))
+                    continue
+                result=subprocess.run([sys.executable,str(target),command,*extra,'--instance',str(number)])
+                self.say('Код завершения: '+str(result.returncode))
             self._status_cache=None
-            self.say('Код завершения: '+str(result.returncode))
-            return command=='uninstall' and result.returncode==0
+            return command=='uninstall' and result is not None and result.returncode==0
         except OSError as exc:self.say('Ошибка запуска: '+str(exc));return False
     def run(self):
         while True:
@@ -775,10 +892,7 @@ class Menu:
                 ('ОБНОВЛЕНИЕ',['5. Обновить Auto-Pin (GitHub)']),
                 ('', ['r. Обновить состояние','0. Выход'])])
             installed=discover()
-            if len(installed)>1:
-                self.say('Экземпляры: '+'; '.join(f'{n} — {mode_label(load_config(n))}, SOCKS {load_config(n)["port"]}' for n in installed))
-                self.say('Ниже показано состояние выбранного экземпляра '+str(self.instance)+'. Переключение: пункт 4.')
-            self.footer()
+            self.overview()
             first_install=not installed
             answer=self.ask('Выбор [Enter — '+('Шаблоны' if first_install else self.config['menu_mode'].title())+']: ').lower()
             if answer=='':answer='t' if first_install else '1' if self.config['menu_mode']=='easy' else '2'
@@ -792,7 +906,7 @@ class Menu:
                 if self.manage():return 0
             elif answer=='4':self.select_instance()
             elif answer=='5':
-                if self.update():return self.reopen()
+                if self.update_selected():return self.reopen()
             elif answer=='r':self._status_cache=None
             else:self.say('Выберите номер из меню.')
 
@@ -816,7 +930,7 @@ def main(argv=None):
         instance=valid_instance(args.instance) if args.instance is not None else (discover() or [1])[0]
         with open('/dev/tty','r',encoding='utf-8',errors='replace') as reader, open('/dev/tty','w',encoding='utf-8',buffering=1) as writer:
             menu=Menu(TerminalIO(reader,writer),instance,args.installer,args.emit_args)
-            return (menu.reopen() if menu.update() else 1) if args.update else menu.run()
+            return (menu.reopen() if menu.update_selected() else 1) if args.update else menu.run()
     except (KeyboardInterrupt,EOFError):return 0
     except (ValueError,OSError,RuntimeError) as exc:print('Меню: '+str(exc),file=sys.stderr);return 1
 

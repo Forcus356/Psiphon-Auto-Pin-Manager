@@ -6,7 +6,7 @@
 
 **Local SOCKS5 · automatic server PIN · Google/Gemini checks · recovery**
 
-![Version](https://img.shields.io/badge/version-4.3.2-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.4.0-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -60,6 +60,24 @@ These guides are available in seven languages. The console menu currently uses R
 <a id="menu"></a>
 
 ## Console Menu
+
+**All-instance overview (4.4):** the main menu displays every installed instance at once. **Templates** contains instances with saved template provenance; **Your instances** contains the rest. Each block has its own Gemini / YouTube / Psiphon role, number, ports, services, autostart, country, PIN, observations, speed, watchdog and version. Unrelated disabled modes are hidden in this overview. Press `r` to refresh all blocks; item 4 selects the instance to edit without hiding the others.
+
+A current YouTube RU/PIN result is not marked searching just because the ordinary state.json is absent. Previous Gemini results are labeled as previous after a restart; current checking/search progress is separate. INCONCLUSIVE is not SERVING. Searching for RU may take time and is not reported complete before verification.
+
+With multiple instances, **status, logs, Xray JSON and saved configuration** first ask for a number or **a — all**. Every output is labeled. Operations item **15** shows saved policy and connection settings without secret TargetServerEntry data. Connection and speed checks also offer selection. Main-menu update item 5 offers one or all instances, sequentially with confirmation per instance and accurate partial-failure reporting.
+
+New templates save provenance automatically. Versions before 4.4 did not record it, so old instances initially appear under Your instances. Use **t → g**, enter existing numbers such as `1,2`, and confirm to mark an old pair as a template. Only grouping metadata changes; policy and services remain unchanged. Role names always follow current settings.
+
+Interactive read commands without an explicit --instance also ask for the scope. Noninteractive automation retains its old instance default. Use --instance N for one without a prompt, or --all for explicit aggregation. --all supports status, logs, config and xray only; it cannot delete or stop instances.
+
+```bash
+psiphon-autopin status --all
+psiphon-autopin logs 50 --all
+psiphon-autopin config --all
+psiphon-autopin xray --all
+psiphon-autopin status --instance 2
+```
 
 **Gemini CAPTCHA:** a redirect to Google's `/sorry/` page is recognized with both standard curl and the optional browser TLS profile. It is no longer mislabeled as missing session fields (`INCONCLUSIVE`). The monitor confirms the CAPTCHA response before searching another exit. Other genuinely inconclusive replies keep their existing policy; a verified PIN alone does not prove Gemini is serving.
 
@@ -165,6 +183,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-M
 | `psiphon-autopin update` | Update from auto-pin. |
 | `auto-pin` | Open the setup/operations menu. |
 | `auto-pin --instance 2` | Open the menu for instance 2. |
+| `psiphon-autopin config` | Show saved user policy and connection settings without server credentials. |
 | `psiphon-autopin status` | Show saved configuration and last result. |
 | `psiphon-autopin check` | Run a fresh connection/policy check. |
 | `psiphon-autopin rotate` | Request server rotation. |
@@ -177,7 +196,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-M
 | `psiphon-autopin stop` | Stop the selected instance. |
 | `psiphon-autopin restart` | Restart the selected instance. |
 | `psiphon-autopin xray` | Print SOCKS outbound JSON for Xray. |
-| `psiphon-autopin-2 status` | Show instance 2 status. |
+| `psiphon-autopin-2 status --instance 2` | Show instance 2 status. |
 | `psiphon-autopin menu` | Open the menu through the original CLI. |
 | `vps-psiphon status` | Compatibility alias for the same manager. |
 | `psiphon-autopin refresh-cache --allow-interruption` | Refresh the datastore cache; interrupts the tunnel. |
@@ -314,7 +333,7 @@ New installations with `auto` use `vps-psiphon`; existing recognized backends ar
 
 ### Update from auto-pin
 
-Main menu item **5 — Update Auto-Pin (GitHub)** updates the selected installed instance while retaining its saved settings. Other instances are unchanged; select another with item 4 to update it. The updater resolves main to a fixed commit, verifies the Git blob and Bash syntax, shows version/commit/SHA-256 and asks for confirmation. Network or verification failure does not run the installer. Older versions are refused. After success, the updated main menu opens automatically.
+Main-menu item **5 — Update Auto-Pin (GitHub)** first offers one instance or **a — all**. Each instance retains its saved settings. Updates run sequentially with confirmation per instance and exact partial-success reporting. The updater resolves main to one commit, verifies the Git blob and Bash syntax, and shows version, commit and SHA-256. Network/verification failures do not run the installer; downgrades are refused. Successful updates reopen the new main menu.
 
 These shortcuts open the same confirmed update action. The menu updater becomes available after this release is first installed; publish all release files to your repository before using it.
 

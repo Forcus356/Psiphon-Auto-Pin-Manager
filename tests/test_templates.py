@@ -59,7 +59,7 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(u.discover(),[1,2])
         self.assertEqual((u.load_config(1)['gemini_check'],u.load_config(1)['youtube_mode']),(True,False))
         self.assertEqual((u.load_config(2)['gemini_check'],u.load_config(2)['youtube_mode']),(False,True))
-        self.assertIn('Экземпляры: 1 — Gemini, SOCKS 40000; 2 — YouTube, SOCKS 40002',terminal.output.getvalue())
+        self.assertIn('Экземпляр 1 — Gemini, SOCKS 40000',terminal.output.getvalue());self.assertIn('Экземпляр 2 — YouTube, SOCKS 40002',terminal.output.getvalue());self.assertIn('====== Шаблоны ======',terminal.output.getvalue())
         self.assertIn('Запуск служб ещё не означает найденный',terminal.output.getvalue())
     def test_cancel_at_common_confirmation_starts_neither_mode(self):
         terminal=Terminal(['1','y','n'])
@@ -182,7 +182,7 @@ class TemplateInstallerTests(unittest.TestCase):
                 expect('Выбор [y — установить');os.write(fd,b'y\n')
                 expect('Установить выбранный шаблон?');os.write(fd,b'y\n')
                 expect('Шаблон установлен. Запуск служб',75)
-            if choice=='1':expect('Экземпляры: 1 — Gemini, SOCKS 40000; 2 — YouTube, SOCKS 40002')
+            if choice=='1':expect('Экземпляр 1 — Gemini, SOCKS 40000');expect('Экземпляр 2 — YouTube, SOCKS 40002')
             expect('Выбор [Enter — Easy]');os.write(fd,b'0\n')
             end=time.monotonic()+10
             while time.monotonic()<end:

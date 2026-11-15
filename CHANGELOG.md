@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.4.0 — 2026-11-15
+
+- Main menu shows every installed instance in independent role-labeled blocks, grouped by saved template provenance versus user instances. Editing selection no longer hides other runtime states or shows another role as disabled.
+- Template origin receipts persist through updates; older installations can mark existing groups through t → g without changing settings or services.
+- Per-instance status/logs/Xray/config scope selectors with an explicit all option; interactive CLI read selectors, --all read-only aggregation, preserved noninteractive alias defaults and explicit --instance overrides. User policy/config viewing excludes TargetServerEntry secrets.
+- Main-menu updates select one or all instances, sequentially confirmed with precise partial-success reporting.
+- Fresh YouTube RU/PIN no longer receives a generic pending warning solely because ordinary state is absent. Stale Gemini verdicts are explicitly previous observations. Search progress is persisted per instance without server credential data.
+- Added independent dashboard, metadata upgrade, read-scope and multi-update regressions; documented all languages.
+
 ## 4.3.2 — 2026-11-15
 
 - Fix Gemini CAPTCHA detection with the default curl probe: a Google `/sorry/` redirect is classified as CAPTCHA before session-field parsing, even without the optional browser TLS profile. Previously it became INCONCLUSIVE and could keep a challenged exit pinned.

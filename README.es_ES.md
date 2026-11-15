@@ -6,7 +6,7 @@
 
 **SOCKS5 local · PIN automático · Google/Gemini · recuperación**
 
-![Version](https://img.shields.io/badge/version-4.3.2-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.4.0-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -60,6 +60,24 @@ Hay documentación en siete idiomas. El menú de consola está actualmente en ru
 <a id="menu"></a>
 
 ## Menú de consola
+
+**Vista general de todas las instancias (4.4):** el menú muestra cada instancia en su propio bloque. «Plantillas» contiene las instancias con origen guardado; «Tus instancias», las demás. Cada bloque muestra Gemini / YouTube / Psiphon, número, puertos, servicios, inicio automático, región, PIN, resultados, velocidad, watchdog y versión. No muestra el modo desactivado de otro servicio. `r` actualiza todos los bloques; 4 selecciona la instancia que se editará.
+
+Un resultado YouTube RU/PIN vigente no aparece como búsqueda por faltar state.json. Los resultados Gemini anteriores al reinicio se identifican como anteriores. INCONCLUSIVE no confirma SERVING; la búsqueda RU puede tardar.
+
+Con varias instancias, estado, logs, JSON Xray y configuración guardada preguntan primero un número o **a — todas**, con resultados etiquetados. Gestión **15** muestra políticas y conexión sin secretos TargetServerEntry. Las pruebas de conexión y velocidad también permiten seleccionar. Actualización 5 permite una o todas, en secuencia y con confirmación individual; los fallos parciales se informan.
+
+Las nuevas plantillas guardan su origen. Las antiguas no tenían esta marca: **t → g**, números como `1,2`, y confirmación las agrupa sin cambiar políticas ni servicios. Los nombres siguen la configuración actual.
+
+Los comandos de consulta interactivos sin --instance preguntan el alcance. La automatización conserva su instancia predeterminada; --instance N evita preguntas y --all agrega status, logs, config o xray. --all no permite borrar ni detener instancias.
+
+```bash
+psiphon-autopin status --all
+psiphon-autopin logs 50 --all
+psiphon-autopin config --all
+psiphon-autopin xray --all
+psiphon-autopin status --instance 2
+```
 
 **Gemini CAPTCHA:** la redirección a la página `/sorry/` de Google se reconoce tanto con curl estándar como con el perfil TLS opcional. Ya no se clasifica como campos de sesión ausentes (`INCONCLUSIVE`). El monitor confirma el CAPTCHA antes de buscar otra salida. Las demás respuestas indeterminadas conservan su política; un PIN verificado por sí solo no confirma que Gemini funcione.
 
@@ -165,6 +183,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-M
 | `psiphon-autopin update` | Actualizar desde auto-pin. |
 | `auto-pin` | Abrir el menú de configuración y gestión. |
 | `auto-pin --instance 2` | Abrir el menú de la instancia 2. |
+| `psiphon-autopin config` | Mostrar política y conexión guardadas sin credenciales del servidor. |
 | `psiphon-autopin status` | Mostrar configuración y último resultado. |
 | `psiphon-autopin check` | Ejecutar una comprobación nueva. |
 | `psiphon-autopin rotate` | Solicitar rotación del servidor. |
@@ -177,7 +196,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-M
 | `psiphon-autopin stop` | Detener la instancia elegida. |
 | `psiphon-autopin restart` | Reiniciar la instancia elegida. |
 | `psiphon-autopin xray` | Imprimir el outbound SOCKS para Xray. |
-| `psiphon-autopin-2 status` | Mostrar el estado de la instancia 2. |
+| `psiphon-autopin-2 status --instance 2` | Mostrar el estado de la instancia 2. |
 | `psiphon-autopin menu` | Abrir el menú desde la CLI original. |
 | `vps-psiphon status` | Alias compatible del mismo gestor. |
 | `psiphon-autopin refresh-cache --allow-interruption` | Renovar la caché; interrumpe el túnel. |
@@ -314,7 +333,7 @@ Una instalación nueva con `auto` usa `vps-psiphon`; se conservan los backends r
 
 ### Actualizar desde auto-pin
 
-El punto **5 — Update Auto-Pin (GitHub)** actualiza la instancia instalada elegida conservando sus ajustes. Las demás no cambian; elígelas con el punto 4. Resuelve main a un commit fijo, verifica el blob Git y la sintaxis Bash, muestra versión/commit/SHA-256 y pide confirmación. Un error de red o verificación impide ejecutar el instalador. Se rechazan versiones antiguas. El menú principal actualizado se abre automáticamente tras el éxito.
+El punto **5 — Actualizar Auto-Pin (GitHub)** permite elegir una instancia o **a — todas**. Conserva la configuración y actualiza en secuencia con confirmación individual e informe preciso de resultados parciales. Fija un commit de main, verifica el blob Git y la sintaxis Bash, y muestra versión, commit y SHA-256. Los errores de red/verificación no ejecutan el instalador; no admite retrocesos. Tras actualizar abre el nuevo menú.
 
 Estos comandos abren la misma actualización con confirmación. La función aparece tras instalar esta versión; publica primero todos los archivos del lanzamiento en tu repositorio.
 

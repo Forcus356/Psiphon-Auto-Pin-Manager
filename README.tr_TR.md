@@ -6,7 +6,7 @@
 
 **Yerel SOCKS5 · otomatik PIN · Google/Gemini denetimi · kurtarma**
 
-![Version](https://img.shields.io/badge/version-4.3.2-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.4.0-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -60,6 +60,24 @@ Belgeler yedi dilde sunulur. Konsol menüsünün etiketleri şu anda Rusçadır;
 <a id="menu"></a>
 
 ## Konsol Menüsü
+
+**Tüm örneklerin görünümü (4.4):** ana menü tüm örnekleri ayrı bloklarda gösterir. Kayıtlı şablon kökeni olanlar «Şablonlar», diğerleri «Örnekleriniz» altında yer alır. Her blok kendi Gemini / YouTube / Psiphon adı, numarası, portları, servisleri, otomatik başlangıcı, bölgesi, PIN durumu, sonuçları, hızı, watchdog ve sürümünü gösterir. Diğer hizmetin kapalı modu bu görünümde gösterilmez. `r` tümünü yeniler; 4 düzenlenecek örneği seçer.
+
+Güncel YouTube RU/PIN sonucu sıradan state.json yok diye arama olarak gösterilmez. Yeniden başlatma öncesi Gemini sonuçları önceki sonuç olarak etiketlenir. INCONCLUSIVE, SERVING değildir; RU araması zaman alabilir.
+
+Birden fazla örnekte durum, günlükler, Xray JSON ve kayıtlı ayarlar önce numara veya **a — tümü** sorar. Her çıktı adlandırılır. Yönetim **15** gizli TargetServerEntry olmadan kullanıcı politikası ve bağlantı ayarlarını gösterir. Bağlantı/hız testlerinde de seçim vardır. Güncelleme 5 birini veya tümünü sırayla, her biri için onayla günceller; kısmi hataları açıklar.
+
+Yeni şablonlar kökenini kaydeder. Eski sürümlerde kayıt yoktur: **t → g**, örneğin `1,2` girip onaylamak yalnız gruplamayı değiştirir, politika ve servisleri korur. Adlar güncel ayarlardan gelir.
+
+Etkileşimli okuma komutları açık --instance yoksa kapsam sorar. Otomasyon eski varsayılanını korur; --instance N soruyu atlar, --all status, logs, config veya xray için hepsini getirir. --all silme/durdurma yapamaz.
+
+```bash
+psiphon-autopin status --all
+psiphon-autopin logs 50 --all
+psiphon-autopin config --all
+psiphon-autopin xray --all
+psiphon-autopin status --instance 2
+```
 
 **Gemini CAPTCHA:** Google `/sorry/` sayfasına yönlendirme hem standart curl hem de isteğe bağlı tarayıcı TLS profiliyle tanınır. Artık eksik oturum alanları (`INCONCLUSIVE`) olarak sınıflandırılmaz. Monitör CAPTCHA yanıtını tekrar doğruladıktan sonra başka çıkış arar. Diğer belirsiz yanıtların politikası değişmez; doğrulanmış PIN tek başına Gemini'nin çalıştığını kanıtlamaz.
 
@@ -165,6 +183,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-M
 | `psiphon-autopin update` | auto-pin üzerinden güncelleme. |
 | `auto-pin` | Ayar ve yönetim menüsünü açar. |
 | `auto-pin --instance 2` | Örnek 2 menüsünü açar. |
+| `psiphon-autopin config` | Sunucu kimlik bilgileri olmadan kayıtlı kullanıcı politikasını ve bağlantıyı göster. |
 | `psiphon-autopin status` | Kayıtlı ayarları ve son sonucu gösterir. |
 | `psiphon-autopin check` | Yeni bağlantı ve politika denetimi yapar. |
 | `psiphon-autopin rotate` | Sunucu rotasyonu ister. |
@@ -177,7 +196,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-M
 | `psiphon-autopin stop` | Seçili örneği durdurur. |
 | `psiphon-autopin restart` | Seçili örneği yeniden başlatır. |
 | `psiphon-autopin xray` | Xray için SOCKS outbound JSON yazdırır. |
-| `psiphon-autopin-2 status` | Örnek 2 durumunu gösterir. |
+| `psiphon-autopin-2 status --instance 2` | Örnek 2 durumunu gösterir. |
 | `psiphon-autopin menu` | Asıl CLI üzerinden menüyü açar. |
 | `vps-psiphon status` | Aynı yönetici için uyumluluk takma adı. |
 | `psiphon-autopin refresh-cache --allow-interruption` | Veritabanı önbelleğini yeniler; tüneli keser. |
@@ -314,7 +333,7 @@ Yeni `auto` kurulumunda `vps-psiphon` seçilir; tanınan mevcut backend korunur.
 
 ### auto-pin üzerinden güncelleme
 
-Ana menü **5 — Update Auto-Pin (GitHub)** seçili kurulu örneği kayıtlı ayarlarını koruyarak günceller. Diğer örnekler değişmez; onları madde 4 ile seçin. Main sabit commite çözülür, Git blob ve Bash sözdizimi doğrulanır, sürüm/commit/SHA-256 gösterilir ve onay istenir. Ağ veya doğrulama hatasında kurucu çalıştırılmaz. Eski sürüm reddedilir. Başarı sonrasında güncel ana menü otomatik açılır.
+Ana menü **5 — Auto-Pin güncelle (GitHub)** bir örnek veya **a — tümü** seçtirir. Kayıtlı ayarlar korunur; güncellemeler sırayla, her örnek için onayla yapılır ve kısmi sonuçlar açıkça bildirilir. main belirli commit olarak çözülür; Git blob ve Bash sözdizimi doğrulanır, sürüm, commit ve SHA-256 gösterilir. Ağ/doğrulama hatasında kurucu çalışmaz; sürüm düşürülmez. Başarıda yeni ana menü açılır.
 
 Bu komutlar aynı onaylı güncellemeyi açar. Önce bu sürüm kurulmalıdır; kullanmadan önce sürümün tüm dosyalarını GitHub deponuza yükleyin.
 
