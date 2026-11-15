@@ -1,9 +1,26 @@
 #!/usr/bin/env bash
-# Forcus Psiphon Auto-Pin Manager v4.2.0
+# Forcus Psiphon Auto-Pin Manager v4.3.0
 # Author: https://github.com/Forcus356
 # Ubuntu/Debian x86_64
 autopin_install_main() {
 set -Eeuo pipefail
+umask 077
+PIN_IMAGE='swarupsengupta2007/psiphon@sha256:ed678abc7145e0fb550eb889a5dfed74bd8495bca16b958d6b7ac582d869bfe6'
+CONSOLE_COMMIT='c49818e8b2fe7b64657aea27b53f12d1374d21eb'
+CONSOLE_SHA256='faf6873ddc1dab6c00e11a090a711fb3a26cfa7dbc1717e0c3b1978dfff4c105'
+CONSOLE_BASE='debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc'
+autopin_return_to_menu() {
+    [[ ${AUTOPIN_MENU_PARENT:-0} != 1 ]] || return 0
+    if [[ ${MENU_REQUESTED:-0} != 1 && ! -t 1 ]]; then return 0; fi
+    if ! ( : </dev/tty ) 2>/dev/null; then return 0; fi
+    # Never carry the installation lock into a long-lived interactive menu.
+    if [[ -n ${AUTOPIN_TRANSACTION_LOCK_FD:-} ]]; then
+        flock -u "$AUTOPIN_TRANSACTION_LOCK_FD"
+        exec {AUTOPIN_TRANSACTION_LOCK_FD}>&-
+    fi
+    echo '[INFO] Сервис запущен; это ещё не подтверждение найденного IP. Текущий результат показан в меню.'
+    exec /usr/local/sbin/auto-pin --instance "$INSTANCE"
+}
 trap 'echo "[ERROR] Line $LINENO; journalctl -u psiphon-autopin -n 80 --no-pager" >&2' ERR
 [[ $EUID -eq 0 ]] || { echo 'Run as root' >&2; exit 1; }
 . /etc/os-release
@@ -15,6 +32,9 @@ cat <<'PY_MENU'
 #!/usr/bin/env python3
 """Interactive setup for Forcus Auto-Pin. CLI flags remain the source of truth."""
 import argparse
+import base64
+import hashlib
+import urllib.request
 import copy
 import datetime as dt
 from dataclasses import dataclass
@@ -24,6 +44,7 @@ import json
 import os
 import re
 import shutil
+import socket
 from pathlib import Path
 import subprocess
 import sys
@@ -31,7 +52,7 @@ import tempfile
 import time
 import unicodedata
 
-VERSION='4.2.0'
+VERSION='4.3.0'
 ROOT=Path('/')
 
 @dataclass(frozen=True)
@@ -64,8 +85,9 @@ FIELDS=(
     Field('delay','Пауза между попытками поиска, секунд','int','Минимум 2.',2,2147483647),
     Field('impersonate','TLS-профиль браузера для Gemini','bool','Используется при проверке Gemini. Браузерный профиль загружается с проверкой SHA256.'),
     Field('backend','Вариант запуска','choice','auto сохраняет/определяет текущий вариант; новая установка использует vps-psiphon.',choices=('auto','vps-psiphon','console')),
+    Field('youtube_mode','YouTube Mode','bool','Ищет Google GeoIP = RU через SOCKS5h и проверяет PIN. Это не проверка отсутствия рекламы. Для Gemini нужен другой экземпляр; один туннель, loopback.'),
 )
-EASY_KEYS=('region','connection_type','gemini_check','port','interval')
+EASY_KEYS=('region','connection_type','gemini_check','port','interval','youtube_mode')
 TRUE={'1','y','yes','да','д','true','on'}
 FALSE={'0','n','no','нет','н','false','off'}
 
@@ -88,7 +110,7 @@ def defaults(instance=1):
         port=40000+2*(instance-1),publish_http=True,bind='127.0.0.1',region_pool=[],tunnel_pool=1,
         deny_regions=['RU','BY','IR','SY','CU','KP','CN','VE'],strict_region=False,
         min_speed_kib=800,probe_mb=4,slow_threshold=2,fail_threshold=3,interval=300,
-        wait=75,delay=12,impersonate=False,backend='auto',menu_mode='easy')
+        wait=75,delay=12,impersonate=False,backend='auto',menu_mode='easy',youtube_mode=False)
 
 def country_list(text):
     values=str(text).replace(',',' ').upper().split()
@@ -144,6 +166,10 @@ def validate(config):
             if not isinstance(value,list):raise ValueError(field.label+': нужен список')
             country_list(' '.join(value))
         else:parse_field(field,'AUTO' if field.kind=='region' and value=='' else str(value))
+    if config['youtube_mode']:
+        if config['gemini_check']:raise ValueError('YouTube и Gemini требуют двух независимых экземпляров')
+        if config['tunnel_pool']!=1:raise ValueError('YouTube Mode требует один туннель для проверяемого PIN')
+        if not ipaddress.ip_address(config['bind']).is_loopback:raise ValueError('YouTube Mode требует loopback')
     if config.get('menu_mode') not in ('easy','advanced'):raise ValueError('Неизвестный режим меню')
     if config['region_pool'] and config['region'] not in config['region_pool']:
         raise ValueError('Текущая страна должна входить в пул стран; очистите пул или выберите страну из него')
@@ -168,9 +194,61 @@ def discover():
         if p['manager'].is_file() or (p['data']/'settings.json').is_file():found.append(n)
     return found
 
+UPDATE_REPO='https://api.github.com/repos/Forcus356/Psiphon-Auto-Pin-Manager'
+
+def version_key(value):
+    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+',value):raise ValueError('Некорректная версия')
+    return tuple(map(int,value.split('.')))
+
+def installed_version(instance):
+    try:
+        text=(paths(instance)['app']/'autopin_menu.py').read_text()
+        found=re.search(r"^VERSION='([0-9]+\.[0-9]+\.[0-9]+)'$",text,re.M)
+        return found.group(1) if found else VERSION
+    except OSError:return VERSION
+
+class UpdateRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,req,fp,code,msg,headers,newurl):
+        if not newurl.startswith(UPDATE_REPO+'/'):
+            raise ValueError('Неожиданный адрес перенаправления GitHub')
+        return super().redirect_request(req,fp,code,msg,headers,newurl)
+
+def update_json(url):
+    if not url.startswith(UPDATE_REPO+'/'):raise ValueError('Недопустимый источник обновления')
+    request=urllib.request.Request(url,headers={'Accept':'application/vnd.github+json','User-Agent':'Forcus-Auto-Pin-Updater','X-GitHub-Api-Version':'2022-11-28'})
+    with urllib.request.build_opener(UpdateRedirects()).open(request,timeout=30) as response:
+        data=response.read(2*1024*1024+1)
+    if len(data)>2*1024*1024:raise ValueError('Ответ GitHub превышает допустимый размер')
+    obj=json.loads(data)
+    if not isinstance(obj,dict):raise ValueError('Некорректный ответ GitHub')
+    return obj
+
+def fetch_update(destination):
+    """Resolve once, verify the immutable Git blob, then syntax-check privately."""
+    commit=update_json(UPDATE_REPO+'/commits/main').get('sha','')
+    if not isinstance(commit,str) or not re.fullmatch('[0-9a-f]{40}',commit):raise ValueError('GitHub не вернул корректный коммит')
+    obj=update_json(UPDATE_REPO+'/contents/install_psiphon_autopin.sh?ref='+commit)
+    if obj.get('type')!='file' or obj.get('path')!='install_psiphon_autopin.sh' or obj.get('encoding')!='base64':
+        raise ValueError('Неожиданный файл обновления')
+    raw=base64.b64decode(str(obj.get('content','')).replace('\n',''),validate=True)
+    if not raw or len(raw)>1024*1024:raise ValueError('Некорректный размер установщика')
+    digest=hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+    if digest!=obj.get('sha'):raise ValueError('Git blob checksum mismatch; update rejected')
+    source=raw.decode('utf-8')
+    found=re.search(r'^# Forcus Psiphon Auto-Pin Manager v([0-9]+\.[0-9]+\.[0-9]+)$',source,re.M)
+    menu_version=re.search(r"^VERSION='([0-9]+\.[0-9]+\.[0-9]+)'$",source,re.M)
+    if not found or not menu_version or found.group(1)!=menu_version.group(1) or 'autopin_install_main() {' not in source or '\0' in source:
+        raise ValueError('Не распознан согласованный установщик Forcus Auto-Pin')
+    destination=Path(destination)
+    with destination.open('xb') as output:
+        os.chmod(destination,0o600);output.write(raw);output.flush();os.fsync(output.fileno())
+    result=subprocess.run(['bash','-n',str(destination)],capture_output=True,text=True,timeout=20)
+    if result.returncode:raise ValueError('Ошибка синтаксиса установщика: '+safe_text(result.stderr[-200:]))
+    return {'version':found.group(1),'commit':commit,'blob_sha1':digest,'sha256':hashlib.sha256(raw).hexdigest(),'path':str(destination)}
+
 def installer_for(instance,fallback=None):
-    candidates=[paths(instance)['app']/'install_psiphon_autopin.sh']
-    if fallback:candidates.append(Path(fallback))
+    candidates=[Path(fallback)] if fallback else []
+    candidates.append(paths(instance)['app']/'install_psiphon_autopin.sh')
     candidates.extend(paths(n)['app']/'install_psiphon_autopin.sh' for n in discover())
     for path in candidates:
         if path.is_file():return path
@@ -189,7 +267,7 @@ def build_args(config):
     args.extend(['--deny-regions',' '.join(config['deny_regions'])])
     for key,on,off in [('gemini_check','--gemini-check','--no-gemini-check'),
         ('publish_http','--http','--no-http'),('strict_region','--strict-region','--no-strict-region'),
-        ('impersonate','--impersonate','--no-impersonate')]:
+        ('impersonate','--impersonate','--no-impersonate'),('youtube_mode','--youtube-mode','--no-youtube-mode')]:
         args.append(on if config[key] else off)
     return args
 
@@ -206,6 +284,9 @@ def atomic_json(path,value):
         with tempfile.NamedTemporaryFile('w',dir=path.parent,delete=False) as f:
             temp=f.name;json.dump(value,f,ensure_ascii=False,indent=2);f.write('\n');f.flush();os.fsync(f.fileno())
         os.chmod(temp,0o600);os.replace(temp,path)
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
     finally:
         if temp and Path(temp).exists():Path(temp).unlink()
 
@@ -298,6 +379,10 @@ def runtime_status(instance,backend):
             p=subprocess.run(['docker','inspect','-f','{{.State.Running}}','vps-psiphon'+suffix],capture_output=True,text=True,timeout=2)
             status['tunnel']['state']='active' if p.returncode==0 and p.stdout.strip()=='true' else 'inactive' if p.returncode==0 else 'not-found'
         except (OSError,subprocess.TimeoutExpired):pass
+    try:
+        p=subprocess.run(['docker','inspect','-f','{{.State.StartedAt}}','vps-psiphon'+suffix],capture_output=True,text=True,timeout=2)
+        status['tunnel']['started_at']=p.stdout.strip() if p.returncode==0 else None
+    except (OSError,subprocess.TimeoutExpired):status['tunnel']['started_at']=None
     return status
 
 def read_state(instance):
@@ -316,9 +401,9 @@ def autostart_label(value):
 
 class Menu:
     def __init__(self,terminal,instance=1,installer=None,emit_args=None):
-        self.terminal=terminal;self.instance=instance;self.installer=installer;self.emit_args=emit_args
+        self.terminal=terminal;self.instance=instance;self.installer=installer or Path(__file__).with_name('install_psiphon_autopin.sh');self.emit_args=emit_args
         self.config=load_config(instance)
-        self.style=ConsoleStyle(terminal);self._status_cache=None
+        self.style=ConsoleStyle(terminal);self._status_cache=None;self._speed_edited=False
     def say(self,text=''):print(text,file=self.terminal,flush=True)
     def ask(self,prompt):
         while True:
@@ -340,6 +425,12 @@ class Menu:
                 self._status_cache=(key,time.monotonic(),runtime_status(self.instance,saved['backend']))
             status=self._status_cache[2]
         else:status={name:{'state':'not-found','autostart':'unknown'} for name in ('tunnel','monitor')}
+        fresh=False
+        try:
+            last=dt.datetime.fromisoformat(state['verified_at'].replace('Z','+00:00'))
+            began=dt.datetime.fromisoformat(status['tunnel']['started_at'].replace('Z','+00:00'))
+            fresh=status['tunnel']['state']=='active' and last>=began
+        except (KeyError,ValueError,TypeError,AttributeError):pass
         tunnel,tone=status_label(status['tunnel']['state']);monitor,monitor_tone=status_label(status['monitor']['state'])
         combined='green' if tone==monitor_tone=='green' else 'red' if 'red' in (tone,monitor_tone) else 'yellow'
         self.say(self.style.info('Туннель: '+tunnel+'  ·  Монитор: '+monitor,combined))
@@ -347,7 +438,7 @@ class Menu:
             auto='монитор '+autostart_label(status['monitor']['autostart'])
             if saved['backend']!='console':auto='туннель '+autostart_label(status['tunnel']['autostart'])+' / '+auto
             self.say(self.style.info('Автозапуск: '+auto))
-        mode='пул, задано '+str(saved['tunnel_pool']) if saved['tunnel_pool']>1 else 'PIN подготовлен' if state.get('pin_prepared') else 'PIN закреплён' if state.get('diagnostic_id') and state.get('adopted_unpinned') is False else 'один туннель'
+        mode='пул, задано '+str(saved['tunnel_pool']) if saved['tunnel_pool']>1 else 'PIN подготовлен' if state.get('pin_prepared') else 'PIN закреплён' if fresh and state.get('diagnostic_id') and state.get('adopted_unpinned') is False else 'проверка IP' if installed else 'один туннель'
         self.say(self.style.info('Регион: '+(saved['region'] or 'AUTO')+'  ·  Режим: '+mode))
         endpoint=saved['bind']+':'+str(saved['port'])
         self.say(self.style.info('SOCKS5: '+endpoint+'  ·  HTTP: '+(str(saved['port']+1) if saved['publish_http'] else 'выключен')))
@@ -360,19 +451,41 @@ class Menu:
             try:verified=dt.datetime.fromisoformat(verified.replace('Z','+00:00')).strftime('%d.%m.%Y %H:%M:%S %Z').strip()
             except ValueError:pass
             self.say(self.style.info('Последняя проверка: '+verified))
+        yt_path=paths(self.instance)['data']/'youtube-status.json'
+        yt={}
+        if saved['youtube_mode']:
+            try:yt=json.loads(yt_path.read_text())
+            except (OSError,ValueError):pass
+            try:
+                age=(dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(yt['checked_at'])).total_seconds()
+                boot=located('/proc/sys/kernel/random/boot_id').read_text().strip()
+                if not 0<=age<=max(600,2*saved['interval']) or yt.get('boot_id')!=boot or (yt.get('status') in ('RU VERIFIED','PIN VERIFIED') and yt.get('container_started_at')!=status['tunnel'].get('started_at')):yt['status']='UNKNOWN'
+            except (KeyError,ValueError,TypeError,OSError):yt['status']='UNKNOWN'
+        label=yt.get('status','UNKNOWN') if saved['youtube_mode'] else 'DISABLED'
+        self.say(self.style.info('YouTube Mode: '+label,'green' if label in ('RU VERIFIED','PIN VERIFIED') else 'yellow' if saved['youtube_mode'] else 'normal'))
+        if saved['youtube_mode']:
+            self.say(self.style.info('Последний YouTube IP: '+str(yt.get('ip') or 'нет данных')+' · Google: '+str(yt.get('google_region') or 'UNKNOWN')))
+            self.say(self.style.info('ID: '+str(yt.get('diagnostic_id') or 'нет данных')+' · Скорость: '+str(yt.get('speed_kib_s') if yt.get('speed_kib_s') is not None else 'нет данных')+' KiB/s'))
+            self.say(self.style.info('Последняя успешная RU-проверка: '+str(yt.get('last_success_at') or 'нет данных')))
         self.say(self.style.info('Watchdog: интервал '+watchdog_period(saved['interval'])))
         output='SOCKS5' if saved['connection_type']=='socks5' else 'Xray JSON'
-        self.say(self.style.info('Скрипт: v'+VERSION+'  ·  Формат: '+output,'cyan'))
+        current=installed_version(self.instance) if installed else VERSION
+        ui='' if current==VERSION else ' · Меню: v'+VERSION
+        self.say(self.style.info('Скрипт: v'+current+ui+'  ·  Формат: '+output,'cyan'))
         dirty=any(self.config.get(f.key)!=saved.get(f.key) for f in FIELDS)
+        if installed and not fresh:
+            waiting=status['monitor']['state'] in ('active','activating')
+            self.say(self.style.info('Проверка / поиск IP выполняется; результат ещё не подтверждён.' if waiting else 'Нет подтверждённого результата для текущего запуска.','yellow'))
         if dirty:self.say(self.style.info('Есть изменения, ещё не применены.','yellow'))
         elif not installed:self.say(self.style.info('Экземпляр ещё не установлен. Выберите настройки.','yellow'))
         self.say()
     def edit(self,mode):
         self.config['menu_mode']=mode
-        fields=[f for f in FIELDS if mode=='advanced' or f.key in EASY_KEYS]
+        by_key={field.key:field for field in FIELDS}
         while True:
+            fields=list(FIELDS) if mode=='advanced' else [by_key[key] for key in EASY_KEYS]+([by_key['min_speed_kib']] if self.config['youtube_mode'] else [])
             groups=[]
-            headings=({0:'ОСНОВНОЕ',4:'WATCHDOG'} if mode=='easy' else {0:'ОСНОВНОЕ',4:'СЕТЬ',6:'СТРАНЫ И ТУННЕЛИ',10:'СКОРОСТЬ',13:'МОНИТОРИНГ',17:'СОВМЕСТИМОСТЬ'})
+            headings=({0:'ОСНОВНОЕ',4:'WATCHDOG',5:'YOUTUBE',6:'СКОРОСТЬ ВИДЕО'} if mode=='easy' else {0:'ОСНОВНОЕ',4:'СЕТЬ',6:'СТРАНЫ И ТУННЕЛИ',10:'СКОРОСТЬ',13:'МОНИТОРИНГ',17:'СОВМЕСТИМОСТЬ',19:'YOUTUBE'})
             for index,field in enumerate(fields):
                 if index in headings:groups.append((headings[index],[]))
                 groups[-1][1].append(f'{index+1:2}. {field.label}: {display(field,self.config[field.key])}')
@@ -391,12 +504,60 @@ class Menu:
                 if field.choices:self.say(' / '.join(f'{n}. {v}' for n,v in enumerate(field.choices,1)))
                 text=self.ask(f'{field.label} [{display(field,self.config[field.key])}], Enter — оставить: ')
                 if text:
-                    value=parse_field(field,text);self.config[field.key]=value
+                    value=parse_field(field,text)
+                    if field.key=='min_speed_kib':self._speed_edited=True
+                    if field.key in ('youtube_mode','gemini_check') and value:
+                        if not self.enable_mode(field.key):continue
+                    else:self.config[field.key]=value
                     if field.key=='region' and self.config['region_pool'] and value not in self.config['region_pool']:
                         self.config['region_pool']=[];self.say('Пул стран очищен: новая страна вне прежнего пула.')
                     if field.key=='region_pool' and value and self.config['region'] not in value:
                         self.config['region']=value[0];self.say('Выбрана первая страна из пула: '+value[0])
             except (ValueError,TypeError) as exc:self.say('Ошибка: '+(str(exc) or 'выберите номер из меню'))
+    def enable_mode(self,key):
+        other='gemini_check' if key=='youtube_mode' else 'youtube_mode'
+        label='YouTube' if key=='youtube_mode' else 'Gemini'
+        if self.config[other]:
+            self.say('YouTube (Google RU) и Gemini работают на разных экземплярах и SOCKS-портах.')
+            self.say('1. Настроить отдельный экземпляр для '+label+' (текущий не изменится)')
+            self.say('2. Использовать текущий, отключив только его другой режим')
+            self.say('0. Отмена')
+            choice=self.ask('Выбор [Enter — 1]: ') or '1'
+            if choice=='1':
+                occupied=set(discover())|{self.instance};ports=set()
+                for number in discover():
+                    cfg=load_config(number);ports.add(cfg['port'])
+                    if cfg['publish_http']:ports.add(cfg['port']+1)
+                candidate=None
+                for number in range(1,100):
+                    if number in occupied:continue
+                    port=40000+2*(number-1)
+                    if {port,port+1}&ports:continue
+                    sockets=[]
+                    try:
+                        for value in (port,port+1):
+                            sock=socket.socket();sockets.append(sock);sock.bind(('127.0.0.1',value))
+                    except OSError:continue
+                    finally:
+                        for sock in sockets:sock.close()
+                    candidate=number;break
+                if candidate is None:raise ValueError('Нет свободного экземпляра и пары портов')
+                previous=self.instance;selected_mode=self.config['menu_mode'];self.instance=candidate;self.config=defaults(candidate)
+                self.config.update(youtube_mode=(key=='youtube_mode'),gemini_check=(key=='gemini_check'),region='' if key=='youtube_mode' else 'NL',min_speed_kib=1500 if key=='youtube_mode' else 800,menu_mode=selected_mode)
+                self._status_cache=None;self._speed_edited=False
+                self.say(f'Настраивается новый экземпляр {candidate}, SOCKS {self.config["port"]}. Экземпляр {previous} не изменён. Примените настройки через y.')
+                return True
+            if choice!='2':return False
+            if not self.confirm('Отключить другой режим только у текущего экземпляра?'):return False
+        if key=='youtube_mode' and (self.config['tunnel_pool']!=1 or self.config['bind']!='127.0.0.1'):
+            if not self.confirm('YouTube требует 1 туннель и 127.0.0.1. Установить эти значения?'):return False
+            self.config.update(tunnel_pool=1,bind='127.0.0.1')
+        if key=='youtube_mode' and not (paths(self.instance)['data']/'settings.json').exists() and not self._speed_edited:
+            self.config['min_speed_kib']=1500
+        self.config[key]=True;self.config[other]=False
+        if key=='youtube_mode':self.say('Обязательная политика Google RU; сохранённые deny/strict параметры не удаляются. Регион Psiphon остаётся выбранным; AUTO расширяет поиск.')
+        return True
+
     def apply(self):
         try:args=build_args(self.config)
         except (ValueError,TypeError) as exc:self.say('Ошибка настроек: '+str(exc));return False
@@ -408,13 +569,46 @@ class Menu:
             return True
         try:
             installer=installer_for(self.instance,self.installer)
-            result=subprocess.run(['bash',str(installer),*args])
+            result=subprocess.run(['bash',str(installer),*args],env={**os.environ,'AUTOPIN_MENU_PARENT':'1'})
             if result.returncode:
                 self.say(f'Установщик завершился с кодом {result.returncode}; сохранение новых настроек не подтверждено. Проверьте журналы.')
                 return False
-            self.config=load_config(self.instance);self._status_cache=None
+            self.config=load_config(self.instance);self._status_cache=None;self._speed_edited=False
             self.show_connection();return True
         except (OSError,RuntimeError) as exc:self.say('Ошибка применения: '+str(exc));return False
+    def update(self):
+        if not paths(self.instance)['manager'].is_file():
+            self.say('Сначала установите этот экземпляр через Easy или Advanced.');return False
+        self.say('Получаю установщик из Forcus356/Psiphon-Auto-Pin-Manager...')
+        self.say('Будут сохранены установленные настройки выбранного экземпляра; несохранённые правки меню не применяются.')
+        try:
+            with tempfile.TemporaryDirectory(prefix='autopin-update-') as tmp:
+                info=fetch_update(Path(tmp)/'install.sh')
+                current=installed_version(self.instance)
+                if version_key(info['version'])<max(version_key(VERSION),version_key(current)):
+                    raise ValueError('На GitHub версия '+info['version']+' старее установленной. Откат запрещён; сначала опубликуйте новую версию в репозитории.')
+                self.panel('Обновление · экземпляр '+str(self.instance),[('',[
+                    'Версия: '+current+' → '+info['version'],
+                    'Коммит: '+info['commit'],
+                    'SHA-256: '+info['sha256']])])
+                if not self.confirm('Обновить этот экземпляр с сохранением настроек?'):
+                    self.say('Отменено; установщик не запускался.');return False
+                result=subprocess.run(['bash',info['path'],'--instance',str(self.instance)],env={**os.environ,'AUTOPIN_MENU_PARENT':'1'})
+                if result.returncode:
+                    self.say('Обновление не подтверждено: установщик завершился с кодом '+str(result.returncode)+'. Проверьте журнал и резервную копию на VPS.');return False
+                receipt={k:v for k,v in info.items() if k!='path'}
+                receipt['updated_at']=dt.datetime.now(dt.timezone.utc).isoformat()
+                atomic_json(paths(self.instance)['data']/'update-source.json',receipt)
+                self.say('Обновление завершено.')
+                return True
+        except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:
+            self.say('Обновление: '+safe_text(str(exc)));return False
+
+    def reopen(self):
+        self.say('Открываю главное меню обновлённого экземпляра...')
+        os.execv(sys.executable,[sys.executable,str(paths(self.instance)['app']/'autopin_menu.py'),'--instance',str(self.instance)])
+        return 0
+
     def show_connection(self):
         value=connection(self.config);self.say('\nГотово. Подключение:')
         self.say(value['uri'] if value['type']=='socks5' else json.dumps(value['outbound'],ensure_ascii=False,indent=2))
@@ -427,7 +621,7 @@ class Menu:
         try:
             value=valid_instance(self.ask('Номер экземпляра 1–99 (существующий или новый): '))
             config=load_config(value)
-            self.instance=value;self.config=config;self._status_cache=None
+            self.instance=value;self.config=config;self._status_cache=None;self._speed_edited=False
         except (ValueError,OSError) as exc:self.say('Ошибка: '+str(exc))
     def manage(self):
         manager=paths(self.instance)['manager']
@@ -472,7 +666,8 @@ class Menu:
             self.panel(f'Forcus Auto-Pin {VERSION} · экземпляр {self.instance}',[
                 ('НАСТРОЙКА',['1. Easy Mode — основные настройки','2. Advanced Mode — все настройки']),
                 ('ОБСЛУЖИВАНИЕ',['3. Управление и диагностика','4. Выбрать / создать экземпляр']),
-                ('', ['0. Выход'])])
+                ('ОБНОВЛЕНИЕ',['5. Обновить Auto-Pin (GitHub)']),
+                ('', ['r. Обновить состояние','0. Выход'])])
             self.footer()
             answer=self.ask('Выбор [Enter — '+self.config['menu_mode'].title()+']: ')
             if answer=='':answer='1' if self.config['menu_mode']=='easy' else '2'
@@ -483,6 +678,9 @@ class Menu:
             elif answer=='3':
                 if self.manage():return 0
             elif answer=='4':self.select_instance()
+            elif answer=='5':
+                if self.update():return self.reopen()
+            elif answer=='r':self._status_cache=None
             else:self.say('Выберите номер из меню.')
 
 class TerminalIO:
@@ -497,13 +695,15 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description='Forcus Auto-Pin Easy / Advanced menu')
     parser.add_argument('--instance',type=int)
     parser.add_argument('--installer',type=Path)
+    parser.add_argument('--update',action='store_true')
     parser.add_argument('--emit-args',type=Path,help=argparse.SUPPRESS)
     args=parser.parse_args(argv)
     if os.geteuid()!=0:print('Запустите меню от root: sudo auto-pin',file=sys.stderr);return 1
     try:
         instance=valid_instance(args.instance) if args.instance is not None else (discover() or [1])[0]
         with open('/dev/tty','r',encoding='utf-8',errors='replace') as reader, open('/dev/tty','w',encoding='utf-8',buffering=1) as writer:
-            return Menu(TerminalIO(reader,writer),instance,args.installer,args.emit_args).run()
+            menu=Menu(TerminalIO(reader,writer),instance,args.installer,args.emit_args)
+            return (menu.reopen() if menu.update() else 1) if args.update else menu.run()
     except (KeyboardInterrupt,EOFError):return 0
     except (ValueError,OSError,RuntimeError) as exc:print('Меню: '+str(exc),file=sys.stderr);return 1
 
@@ -705,11 +905,14 @@ DATA=/var/lib/psiphon-autopin; CONTAINER=vps-psiphon
 CONNECTION=socks5; MENU_MODE=easy
 INSTANCE=1; REGION_POOL=''; DENY_REGIONS='RU BY IR SY CU KP CN VE'; MIN_SPEED=800; SLOW_THRESHOLD=2; IMPERSONATE=0; TUNNEL_POOL=1; BIND=127.0.0.1; PUBLISH_HTTP=1
 REGION=''; INTERVAL=300; WAIT=75; DELAY=12; SOCKS_PORT=''
+YOUTUBE_MODE=0
 GEMINI_CHECK=1; PROBE_MB=4; FAIL_THRESHOLD=3; STRICT_REGION=0
 PORT_EXPLICIT=0; BACKEND=auto; REGION_EXPLICIT=0
 declare -A POLICY_SET=()
 while (($#)); do
     case "$1" in
+        --youtube-mode) POLICY_SET[youtube_mode]=1; YOUTUBE_MODE=1; shift ;;
+        --no-youtube-mode) POLICY_SET[youtube_mode]=1; YOUTUBE_MODE=0; shift ;;
         --connection) POLICY_SET[connection_type]=1; CONNECTION=${2:?Missing connection type}; shift 2 ;;
         --menu-mode) POLICY_SET[menu_mode]=1; MENU_MODE=${2:?Missing mode}; shift 2 ;;
         --bind) POLICY_SET[bind]=1; BIND=${2:?Missing address}; shift 2 ;;
@@ -736,7 +939,7 @@ while (($#)); do
         --strict-region) POLICY_SET[strict_region]=1; STRICT_REGION=1; shift ;;
         --probe-mb) POLICY_SET[probe_mb]=1; PROBE_MB=${2:?Missing MB}; shift 2 ;;
         --fail-threshold) POLICY_SET[fail_threshold]=1; FAIL_THRESHOLD=${2:?Missing threshold}; shift 2 ;;
-        --help) printf '%b\n' 'Interactive: install_psiphon_autopin.sh [--menu [--instance N]]; reopen: auto-pin.\nUsage: install_psiphon_autopin.sh [--connection socks5|xray] [--bind 127.0.0.1] [--no-http] [--instance 1..99] [--region-pool NL,DE] [--min-speed 800] [--slow-threshold 2] [--deny-regions "RU BY IR SY CU KP CN VE"] [--impersonate] [--tunnel-pool 1..32] [--backend auto|console|vps-psiphon] [--region DE|AUTO] [--port 40000] [--interval 300] [--wait 75] [--delay 12] [--gemini-check] [--probe-mb 0..10] [--strict-region] [--fail-threshold 3]'; exit 0 ;;
+        --help) printf '%b\n' 'Interactive: install_psiphon_autopin.sh [--menu [--instance N]]; reopen: auto-pin.\nUsage: install_psiphon_autopin.sh [--youtube-mode|--no-youtube-mode] [--connection socks5|xray] [--bind 127.0.0.1] [--no-http] [--instance 1..99] [--region-pool NL,DE] [--min-speed 800] [--slow-threshold 2] [--deny-regions "RU BY IR SY CU KP CN VE"] [--impersonate] [--tunnel-pool 1..32] [--backend auto|console|vps-psiphon] [--region DE|AUTO] [--port 40000] [--interval 300] [--wait 75] [--delay 12] [--gemini-check] [--probe-mb 0..10] [--strict-region] [--fail-threshold 3]'; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -765,7 +968,7 @@ if [[ $BACKEND == auto ]]; then
         BACKEND=vps-psiphon
     elif [[ -f $DATA/settings.json ]]; then
         BACKEND=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("backend","console"))' "$DATA/settings.json")
-    elif docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null | grep -qx 'local-psiphon-console:latest'; then
+    elif docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null | grep -Eqx 'local-psiphon-console:(latest|4\.3\.0)'; then
         BACKEND=console
     else
         BACKEND=vps-psiphon
@@ -807,16 +1010,25 @@ if [[ -f $DATA/settings.json ]]; then
     mapfile -t saved_policy < <(python3 - "$DATA/settings.json" <<'SAVED_POLICY'
 import json,sys
 s=json.load(open(sys.argv[1]))
-for key,default in [('region_pool',[]),('deny_regions',['RU','BY','IR','SY','CU','KP','CN','VE']),('min_speed_kib',800),('slow_threshold',2),('tunnel_pool',1),('probe_mb',4),('interval',300),('wait',75),('delay',12),('fail_threshold',3),('impersonate',False),('gemini_check',True),('bind','127.0.0.1'),('publish_http',True),('strict_region',False),('connection_type','socks5'),('menu_mode','easy')]:
+for key,default in [('region_pool',[]),('deny_regions',['RU','BY','IR','SY','CU','KP','CN','VE']),('min_speed_kib',800),('slow_threshold',2),('tunnel_pool',1),('probe_mb',4),('interval',300),('wait',75),('delay',12),('fail_threshold',3),('impersonate',False),('gemini_check',True),('bind','127.0.0.1'),('publish_http',True),('strict_region',False),('connection_type','socks5'),('menu_mode','easy'),('youtube_mode',False)]:
     v=s.get(key,default)
     print(' '.join(v) if isinstance(v,list) else v if isinstance(v,str) else int(v))
 SAVED_POLICY
 )
-    fields=(region_pool deny_regions min_speed_kib slow_threshold tunnel_pool probe_mb interval wait delay fail_threshold impersonate gemini_check bind publish_http strict_region connection_type menu_mode)
-    variables=(REGION_POOL DENY_REGIONS MIN_SPEED SLOW_THRESHOLD TUNNEL_POOL PROBE_MB INTERVAL WAIT DELAY FAIL_THRESHOLD IMPERSONATE GEMINI_CHECK BIND PUBLISH_HTTP STRICT_REGION CONNECTION MENU_MODE)
+    fields=(region_pool deny_regions min_speed_kib slow_threshold tunnel_pool probe_mb interval wait delay fail_threshold impersonate gemini_check bind publish_http strict_region connection_type menu_mode youtube_mode)
+    variables=(REGION_POOL DENY_REGIONS MIN_SPEED SLOW_THRESHOLD TUNNEL_POOL PROBE_MB INTERVAL WAIT DELAY FAIL_THRESHOLD IMPERSONATE GEMINI_CHECK BIND PUBLISH_HTTP STRICT_REGION CONNECTION MENU_MODE YOUTUBE_MODE)
     for index in "${!fields[@]}"; do
         if [[ -z ${POLICY_SET[${fields[$index]}]:-} ]]; then printf -v "${variables[$index]}" '%s' "${saved_policy[$index]}"; fi
     done
+fi
+# New YouTube instances get a video floor; saved/explicit speeds are never replaced.
+if (( YOUTUBE_MODE )) && [[ ! -f $DATA/settings.json && -z ${POLICY_SET[min_speed_kib]:-} ]]; then
+    MIN_SPEED=1500
+fi
+if (( YOUTUBE_MODE )); then
+    (( ! GEMINI_CHECK )) || { echo '[ERROR] YouTube and Gemini need separate instances. Use --no-gemini-check for YouTube and --instance N for Gemini.' >&2; exit 2; }
+    (( TUNNEL_POOL == 1 )) || { echo '[ERROR] YouTube requires --tunnel-pool 1 for verified PIN.' >&2; exit 2; }
+    [[ $BIND == 127.* ]] || { echo '[ERROR] YouTube requires loopback binding.' >&2; exit 2; }
 fi
 [[ $CONNECTION == socks5 || $CONNECTION == xray ]] || { echo 'Connection must be socks5 or xray' >&2; exit 2; }
 [[ $MENU_MODE == easy || $MENU_MODE == advanced ]] || { echo 'Menu mode must be easy or advanced' >&2; exit 2; }
@@ -868,9 +1080,22 @@ chmod 700 /var/lib/psiphon-autopin-system
 exec {AUTOPIN_TRANSACTION_LOCK_FD}>>/var/lib/psiphon-autopin-system/dependencies.lock
 chmod 600 /var/lib/psiphon-autopin-system/dependencies.lock
 flock -x "$AUTOPIN_TRANSACTION_LOCK_FD"
+python3 - "$INSTANCE" "$SOCKS_PORT" "$PUBLISH_HTTP" <<'PORT_RESERVATIONS'
+from pathlib import Path
+import json,sys
+number,port,publish=map(int,sys.argv[1:]);wanted={port,port+1} if publish else {port}
+for p in Path('/var/lib').glob('psiphon-autopin*/settings.json'):
+    try:c=json.loads(p.read_text())
+    except (OSError,ValueError):raise SystemExit('Cannot validate saved proxy ports: '+str(p))
+    other=int(c.get('instance',1 if p.parent.name=='psiphon-autopin' else p.parent.name.rsplit('-',1)[-1]))
+    if other==number:continue
+    used={int(c.get('port',40000+2*(other-1)))}
+    if c.get('publish_http',True):used.add(min(used)+1)
+    if wanted&used:raise SystemExit(f'Proxy port reserved by instance {other}: {sorted(wanted&used)}')
+PORT_RESERVATIONS
 mkdir -p "$ROOT" "$CONF" "$APP" "$DATA"
 chmod 700 "$DATA"
-echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v4.2.0; backend=$BACKEND"
+echo "[INFO] Region=${REGION:-AUTO}; SOCKS5=127.0.0.1:$SOCKS_PORT; manager v4.3.0; backend=$BACKEND"
 
 # Monitor is stopped after installation ownership checks below.
 
@@ -910,6 +1135,15 @@ if ! docker info >/dev/null 2>&1; then
     echo '[ERROR] Docker daemon not responding' >&2; exit 1
 fi
 
+# Refuse an obsolete compiler before stopping a working instance. Existing Go is never replaced.
+GO_VERSION_TEXT=$(GOTOOLCHAIN=local go version)
+python3 - "$GO_VERSION_TEXT" <<'GO_VERSION_CHECK'
+import re,sys
+found=re.search(r'go([0-9]+)\.([0-9]+)',sys.argv[1])
+if not found or tuple(map(int,found.groups()))<(1,21):
+    raise SystemExit('Go 1.21+ is required (exporter dependency needs Go 1.22; Go 1.21+ may select a checksum-verified toolchain). Existing Go and services were not replaced.')
+GO_VERSION_CHECK
+
 # Check both listeners when creating a container or changing its ports.
 port_occupied() {
     ss -ltnH | awk '{print $4}' | grep -Eq "(^|:)$1$"
@@ -930,7 +1164,7 @@ if [[ $BACKEND == vps-psiphon ]]; then
     fi
     # Reject name/mount/image overrides before changing any running services.
     if (( LEGACY )); then
-        python3 - "$ENVF" "$CONTAINER" "$CONF" <<'VALIDATE_VPS'
+        python3 - "$ENVF" "$CONTAINER" "$CONF" "$PIN_IMAGE" <<'VALIDATE_VPS'
 import shlex,sys
 values={}
 for line in open(sys.argv[1]):
@@ -938,17 +1172,19 @@ for line in open(sys.argv[1]):
         key,value=line.rstrip().split('=',1)
         parts=shlex.split(value,comments=True)
         values[key]=' '.join(parts)
-for key,want in {'NAME':sys.argv[2],'CONF_DIR':sys.argv[3],
-                 'IMAGE':'swarupsengupta2007/psiphon:latest'}.items():
+if values.get('IMAGE','swarupsengupta2007/psiphon:latest') not in ('swarupsengupta2007/psiphon:latest',sys.argv[4]):raise SystemExit('Unsupported vps-psiphon IMAGE; no services changed')
+for key,want in {'NAME':sys.argv[2],'CONF_DIR':sys.argv[3]}.items():
     if values.get(key,want)!=want:raise SystemExit(f'Unsupported vps-psiphon {key}; no services changed')
 VALIDATE_VPS
         if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
-            [[ $(docker inspect -f '{{.Config.Image}}' "$CONTAINER") == swarupsengupta2007/psiphon:latest &&
+            CURRENT_IMAGE=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER")
+            [[ ( $CURRENT_IMAGE == swarupsengupta2007/psiphon:latest || $CURRENT_IMAGE == "$PIN_IMAGE" ) &&
                $(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Source}}{{end}}{{end}}' "$CONTAINER") == "$CONF" ]] || {
                 echo '[ERROR] Foreign vps-psiphon container; no services changed.' >&2; exit 1;
             }
         fi
     fi
+    docker pull "$PIN_IMAGE"
     systemctl stop "$MONITOR" 2>/dev/null || true
     # Only Auto-Pin may rotate this tunnel: disable the independent watchdog.
     systemctl disable --now "$CONTAINER-watchdog.timer" "$CONTAINER-watchdog.service" 2>/dev/null || true
@@ -968,11 +1204,11 @@ VALIDATE_VPS
         for port in "${ports[@]}"; do
             if port_occupied "$port"; then echo "[ERROR] Proxy port $port occupied" >&2; exit 1; fi
         done
-        docker pull swarupsengupta2007/psiphon:latest
-        docker run --rm --entrypoint cat swarupsengupta2007/psiphon:latest /etc/psiphon/psiphon.config > "$CONF/psiphon.config"
+        docker pull "$PIN_IMAGE"
+        docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --entrypoint cat "$PIN_IMAGE" /etc/psiphon/psiphon.config > "$CONF/psiphon.config"
         chown 1000:1000 "$CONF/psiphon.config"; chmod 600 "$CONF/psiphon.config"
         cat > "$ENVF" <<EOF
-IMAGE=swarupsengupta2007/psiphon:latest
+IMAGE=$PIN_IMAGE
 NAME=$CONTAINER
 CONF_DIR=$CONF
 DEVICE_REGION=
@@ -986,12 +1222,12 @@ EOF
         exit 1
     fi
     # Keep host ports separate from container ports; do not patch upstream with sed.
-    python3 - "$ENVF" "$REGION" "$SOCKS_PORT" "$HTTP_PORT" "$CONTAINER" "$CONF" "$TUNNEL_POOL" "$BIND" "$PUBLISH_HTTP" <<'VPS_ENV'
+    python3 - "$ENVF" "$REGION" "$SOCKS_PORT" "$HTTP_PORT" "$CONTAINER" "$CONF" "$TUNNEL_POOL" "$BIND" "$PUBLISH_HTTP" "$PIN_IMAGE" <<'VPS_ENV'
 from pathlib import Path
 import sys
-p=Path(sys.argv[1]);region,socks,http,name,conf,pool,bind,publish=sys.argv[2:]
+p=Path(sys.argv[1]);region,socks,http,name,conf,pool,bind,publish,image=sys.argv[2:]
 updates={'NAME':name,'CONF_DIR':conf,
-         'IMAGE':'swarupsengupta2007/psiphon:latest',
+         'IMAGE':image,
          'BIND':bind,'SOCKS_PORT':socks,'HTTP_PORT':http,
          'PUBLISH_HTTP':publish,'EGRESS_REGION':region,'TUNNEL_POOL_SIZE':pool,
          'REGION_POOL':"''"}
@@ -999,11 +1235,12 @@ lines=p.read_text().splitlines()
 lines=[line for line in lines if line.split('=',1)[0] not in updates]
 p.write_text('\n'.join(lines+[f'{k}={v}' for k,v in updates.items()])+'\n')
 VPS_ENV
-    sed "s/@P@/$CONTAINER/g" > "$RUNNER" <<'VPS_RUN'
+    sed -e "s/@P@/$CONTAINER/g" -e "s|@IMAGE@|$PIN_IMAGE|g" > "$RUNNER" <<'VPS_RUN'
 #!/usr/bin/env bash
 # Managed by Forcus Auto-Pin. Host ports in env; fixed ports inside Docker.
 set -euo pipefail
 . /etc/default/@P@
+[[ $IMAGE == '@IMAGE@' ]] || { echo 'Unpinned Psiphon image rejected' >&2; exit 1; }
 python3 - "$BIND" <<'RUNTIME_BIND'
 import ipaddress,sys
 p=ipaddress.ip_address(sys.argv[1])
@@ -1027,15 +1264,18 @@ VPS_CONFIG
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 ports=(-p "${BIND}:${SOCKS_PORT}:1080")
 if [[ ${PUBLISH_HTTP:-1} == 1 ]]; then ports+=(-p "${BIND}:${HTTP_PORT}:8080"); fi
-exec docker run --rm --name "$NAME" \
+chown -R 1000:1000 "$CONF_DIR"
+exec docker run --rm --name "$NAME" --user 1000:1000 --workdir /config \
+    --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256 \
+    --entrypoint /usr/local/bin/psiphon \
     "${ports[@]}" \
     -e PUID=1000 -e PGID=1000 -e SOCKS_PORT=1080 -e HTTP_PORT=8080 \
     -e DEVICE_REGION="${DEVICE_REGION:-}" -e EGRESS_REGION="${EGRESS_REGION:-}" \
-    -v "${CONF_DIR}:/config" "$IMAGE"
+    -v "${CONF_DIR}:/config" "$IMAGE" -config /config/psiphon.config
 VPS_RUN
     chmod 755 "$RUNNER"
     if [[ ! -s $CONF/psiphon.config ]]; then
-        docker run --rm --entrypoint cat swarupsengupta2007/psiphon:latest /etc/psiphon/psiphon.config > "$CONF/psiphon.config"
+        docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --entrypoint cat "$PIN_IMAGE" /etc/psiphon/psiphon.config > "$CONF/psiphon.config"
         chown 1000:1000 "$CONF/psiphon.config"
         chmod 600 "$CONF/psiphon.config"
     fi
@@ -1057,12 +1297,30 @@ VPS_REGION
 Description=Forcus Psiphon tunnel $INSTANCE
 After=docker.service network-online.target
 Requires=docker.service
+PartOf=docker.service
 [Service]
 ExecStart=$RUNNER
 ExecStop=/usr/bin/docker stop -t 10 $CONTAINER
 Restart=always
 RestartSec=10
 TimeoutStartSec=0
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+ReadWritePaths=$CONF
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -1070,103 +1328,80 @@ EOF
     systemctl enable "$CONTAINER.service"
     systemctl start "$CONTAINER.service"
 else
+CONSOLE_EXISTS=0
 if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
-    [[ -f $CONF/psiphon.config ]] || { echo "Missing $CONF/psiphon.config" >&2; exit 1; }
-    # Never adopt a foreign container with the same name: legacy installations
-    # commonly publish 40000:1080 and ignore the new port in the JSON.
     IMAGE=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER")
     NETMODE=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CONTAINER")
     MOUNT_OK=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Source}}{{end}}{{end}}' "$CONTAINER")
-    if [[ "$IMAGE" != 'local-psiphon-console:latest' || "$NETMODE" != 'host' || "$MOUNT_OK" != "$CONF" ]]; then
-        echo "[ERROR] Existing $CONTAINER is not ours (image=$IMAGE network=$NETMODE mount=$MOUNT_OK)." >&2
-        echo '[ERROR] Stop legacy psiphon services and migrate explicitly; no container was replaced.' >&2
-        exit 1
-    fi
-    systemctl stop "$MONITOR" 2>/dev/null || true
-    echo '[INFO] Existing compatible Psiphon container preserved.'
-    CURRENT_SOCKS_PORT=$(python3 - "$CONF/psiphon.config" <<'PYOLDPORT'
-import json,sys
-print(json.load(open(sys.argv[1])).get('LocalSocksProxyPort',40000))
-PYOLDPORT
-)
-    if [[ "$CURRENT_SOCKS_PORT" != "$SOCKS_PORT" ]]; then
-        if proxy_port_occupied; then
-            echo "[ERROR] New SOCKS/HTTP port $SOCKS_PORT/$HTTP_PORT occupied" >&2; exit 1
-        fi
-    fi
-    docker start "$CONTAINER" >/dev/null || true
+    [[ ( $IMAGE == local-psiphon-console:latest || $IMAGE == local-psiphon-console:4.3.0 ) && $NETMODE == host && $MOUNT_OK == "$CONF" ]] || {
+        echo '[ERROR] Existing container is not our console backend; no services changed.' >&2; exit 1;
+    }
+    [[ -f $CONF/psiphon.config ]] || { echo 'Missing console config' >&2; exit 1; }
+    CONSOLE_EXISTS=1
 else
     [[ ! -e $CONF/psiphon.config ]] || { echo 'Config exists but container missing; refusing overwrite.' >&2; exit 1; }
-    if proxy_port_occupied; then
-        echo "SOCKS/HTTP port $SOCKS_PORT/$HTTP_PORT already occupied" >&2; exit 1
-    fi
-    systemctl stop "$MONITOR" 2>/dev/null || true
-    echo '[INFO] Bootstrapping Psiphon...'
-    docker pull swarupsengupta2007/psiphon:latest
-    docker run --rm --entrypoint cat swarupsengupta2007/psiphon:latest /etc/psiphon/psiphon.config > "$CONF/psiphon.config"
-    chmod 600 "$CONF/psiphon.config"
-    python3 - "$CONF/psiphon.config" "$REGION" "$SOCKS_PORT" "$HTTP_PORT" <<'CONFIG_INIT'
-import json,sys
-p,r,socks,http=sys.argv[1:]
-c=json.load(open(p))
-c.update(EgressRegion=r,ListenInterface='lo',LocalSocksProxyPort=int(socks),LocalHttpProxyPort=int(http),TunnelPoolSize=1,EmitDiagnosticNotices=True,DisableReplay=True)
-c.pop('LocalSocksProxyListenAddress',None)
-c.pop('LocalHttpProxyListenAddress',None)
-with open(p,'w') as f: json.dump(c,f,indent=2); f.write('\n')
-CONFIG_INIT
-    tree=$(mktemp)
-    curl --fail --location --silent --show-error --retry 3 'https://api.github.com/repos/Psiphon-Labs/psiphon-tunnel-core-binaries/git/trees/master?recursive=1' -o "$tree"
-    path=$(python3 - "$tree" <<'PICK_BINARY'
-import json,sys
-rows=json.load(open(sys.argv[1]))['tree']
-m=[v['path'] for v in rows if v['type']=='blob' and v['path'].startswith('linux/') and any(x in v['path'].lower() for x in ('amd64','x86_64')) and any(x in v['path'].lower() for x in ('consoleclient','psiphon-tunnel-core'))]
-if len(m)!=1: raise SystemExit('Expected one official executable: '+str(m))
-print(m[0])
-PICK_BINARY
-)
-    rm -f "$tree"
-    curl --fail --location --silent --show-error --retry 3 "https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/master/$path" -o "$ROOT/ConsoleClient"
-    chmod 755 "$ROOT/ConsoleClient"
-    cat > "$ROOT/Dockerfile" <<'DOCKERFILE'
-FROM debian:bookworm-slim
+    if proxy_port_occupied; then echo 'Proxy port occupied' >&2; exit 1; fi
+    docker pull "$PIN_IMAGE"
+    docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --entrypoint cat "$PIN_IMAGE" /etc/psiphon/psiphon.config > "$CONF/psiphon.config"
+fi
+# Verify before chmod, Docker COPY, or stopping a working container. No branch-name fallback.
+console_tmp=$(mktemp "$ROOT/.console.XXXXXX")
+curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 3 --max-time 180 \
+    "https://raw.githubusercontent.com/Psiphon-Labs/psiphon-tunnel-core-binaries/$CONSOLE_COMMIT/linux/psiphon-tunnel-core-x86_64" -o "$console_tmp"
+if ! printf '%s  %s\n' "$CONSOLE_SHA256" "$console_tmp" | sha256sum --check --status; then
+    rm -f "$console_tmp"; echo '[SECURITY ERROR] ConsoleClient SHA-256 mismatch; not executed.' >&2; exit 1
+fi
+chmod 755 "$console_tmp";mv -f "$console_tmp" "$ROOT/ConsoleClient"
+cat > "$ROOT/Dockerfile" <<DOCKERFILE
+FROM $CONSOLE_BASE
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY ConsoleClient /usr/local/bin/ConsoleClient
+USER 1000:1000
 WORKDIR /config
 CMD ["/usr/local/bin/ConsoleClient", "-config", "/config/psiphon.config", "-dataRootDirectory", "/config"]
 DOCKERFILE
-    docker build -t local-psiphon-console:latest "$ROOT"
-    docker run -d --name "$CONTAINER" --restart unless-stopped --network host -v "$CONF:/config" local-psiphon-console:latest >/dev/null
-    echo '[OK] Created Psiphon container.'
+# Do not send the private datastore/configuration into the Docker build context.
+cat > "$ROOT/.dockerignore" <<'DOCKER_IGNORE'
+**
+!Dockerfile
+!ConsoleClient
+DOCKER_IGNORE
+docker build -t local-psiphon-console:4.3.0 "$ROOT"
+if (( CONSOLE_EXISTS )); then
+    OLD_PORT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("LocalSocksProxyPort"))' "$CONF/psiphon.config")
+    if [[ $OLD_PORT != "$SOCKS_PORT" ]] && proxy_port_occupied; then echo 'New proxy port occupied' >&2; exit 1; fi
 fi
-
-# Update the region on re-install. Invalidate stale pin state when region changes.
-SYNC_CHANGED=$(python3 - "$CONF/psiphon.config" "$DATA/state.json" "$REGION" "$SOCKS_PORT" "$HTTP_PORT" <<'SYNC_REGION'
-import json,sys,os,shutil,datetime
-p,s,r,socks,http=sys.argv[1:];c=json.load(open(p))
-routing_changed=(c.get('EgressRegion','')!=r or c.get('LocalSocksProxyPort')!=int(socks) or c.get('LocalHttpProxyPort')!=int(http))
-security_changed=(c.get('ListenInterface')!='lo' or 'LocalSocksProxyListenAddress' in c or 'LocalHttpProxyListenAddress' in c)
-if routing_changed or security_changed:
-    shutil.copy2(p,p+'.before-update-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
-    c['EgressRegion']=r
-    c['ListenInterface']='lo'
-    c['LocalSocksProxyPort']=int(socks)
-    c['LocalHttpProxyPort']=int(http)
-    c.pop('LocalSocksProxyListenAddress',None)
-    c.pop('LocalHttpProxyListenAddress',None)
-    if routing_changed:
-        c.pop('TargetServerEntry',None)
-        if os.path.isfile(s):os.unlink(s)
-    with open(p,'w') as f:json.dump(c,f,indent=2);f.write('\n')
-    print('security_changed' if security_changed and not routing_changed else 'changed')
-SYNC_REGION
-)
-if [[ -n "$SYNC_CHANGED" ]]; then
-    echo "[INFO] Region, port or loopback security settings changed: restarting Psiphon"
-    docker restart "$CONTAINER" >/dev/null
-fi
-
+systemctl stop "$MONITOR" 2>/dev/null || true
+if (( CONSOLE_EXISTS )); then docker stop "$CONTAINER" >/dev/null; fi
+python3 - "$CONF/psiphon.config" "$DATA/state.json" "$REGION" "$SOCKS_PORT" "$HTTP_PORT" "$PUBLISH_HTTP" <<'CONSOLE_CONFIG'
+import json,sys
+from pathlib import Path
+p,state,region,socks,http,publish=sys.argv[1:];c=json.loads(Path(p).read_text())
+if c.get('EgressRegion','')!=region:
+    c.pop('TargetServerEntry',None);Path(state).unlink(missing_ok=True)
+c.update(EgressRegion=region,ListenInterface='lo',LocalSocksProxyPort=int(socks),LocalHttpProxyPort=int(http),DisableLocalHTTPProxy=publish=='0',EmitDiagnosticNotices=True,DisableReplay=True)
+c.pop('LocalSocksProxyListenAddress',None);c.pop('LocalHttpProxyListenAddress',None)
+Path(p).write_text(json.dumps(c,indent=2)+'\n')
+CONSOLE_CONFIG
+chown -R 1000:1000 "$CONF"
+docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$CONTAINER" --restart unless-stopped --network host --user 1000:1000 \
+    --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256 \
+    -v "$CONF:/config" local-psiphon-console:4.3.0 >/dev/null
 fi # console backend
 
+python3 - "$DATA/settings.json" "$CONF/psiphon.config" "$DATA/state.json" "$YOUTUBE_MODE" <<'MODE_CHANGE'
+import json,sys
+from pathlib import Path
+p,c,state=map(Path,sys.argv[1:4]);enabled=sys.argv[4]
+old=json.loads(p.read_text()) if p.exists() else {}
+if bool(old.get('youtube_mode',False))!=bool(int(enabled)):
+    cfg=json.loads(c.read_text());cfg['TargetServerEntry']='';c.write_text(json.dumps(cfg,indent=2)+'\n')
+    state.unlink(missing_ok=True)
+    (p.parent/'youtube-status.json').unlink(missing_ok=True)
+    (p.parent/'initial-pin-attempt.json').unlink(missing_ok=True)
+    (p.parent/'mode-restart-required').touch()
+MODE_CHANGE
 POOL_CHANGED=$(python3 - "$CONF/psiphon.config" "$DATA/state.json" "$TUNNEL_POOL" <<'POOL_CONFIG'
 import json,sys
 from pathlib import Path
@@ -1177,7 +1412,8 @@ if c.get('TunnelPoolSize',1)!=pool or (pool>1 and c.get('TargetServerEntry')):
     Path(p).write_text(json.dumps(c,indent=2)+'\n');print('changed')
 POOL_CONFIG
 )
-if [[ -n $POOL_CHANGED ]]; then
+if [[ -n $POOL_CHANGED || -f $DATA/mode-restart-required ]]; then
+    rm -f "$DATA/mode-restart-required"
     if [[ $BACKEND == vps-psiphon ]]; then systemctl restart "$CONTAINER.service"; else docker restart "$CONTAINER" >/dev/null; fi
 fi
 
@@ -1233,7 +1469,7 @@ verify_proxy_binding() {
           }
         }')
     if [[ -n $bad ]]; then
-        echo "[SECURITY ERROR] Psiphon proxy is listening outside localhost:" >&2
+        echo "[SECURITY ERROR] Psiphon proxy is listening outside configured address $BIND:" >&2
         echo "$bad" >&2
         echo '[SECURITY ERROR] Stopping Psiphon to prevent exposure.' >&2
         if [[ $BACKEND == vps-psiphon ]]; then systemctl stop "$CONTAINER.service"; else docker stop "$CONTAINER" >/dev/null || true; fi
@@ -1247,9 +1483,9 @@ verify_proxy_binding
 # Check ONLY through the proxy. A failure must never fall back to a direct IP probe.
 if ! curl -4 -fsS --max-time 15 --noproxy '' --proxy socks5h://127.0.0.1:${SOCKS_PORT} https://api.ipify.org >/dev/null 2>&1; then
     echo '[INFO] Checking bootstrap fields (SOCKS5 not yet responding)...'
-    docker pull swarupsengupta2007/psiphon:latest
+    docker pull "$PIN_IMAGE"
     template=$(mktemp)
-    docker run --rm --entrypoint cat swarupsengupta2007/psiphon:latest /etc/psiphon/psiphon.config > "$template"
+    docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --entrypoint cat "$PIN_IMAGE" /etc/psiphon/psiphon.config > "$template"
     BOOTSTRAP_CHANGED=$(python3 - "$CONF/psiphon.config" "$template" <<'BOOTSTRAP'
 import json,sys,shutil,datetime
 p,t=sys.argv[1:]; a=json.load(open(p)); b=json.load(open(t))
@@ -1352,7 +1588,7 @@ GO_EXPORTER
 if [[ ! -x "$APP/psiphon-server-export" || "$APP/psiphon-server-export.go" -nt "$APP/psiphon-server-export" ]]; then
     builddir=$(mktemp -d)
     cp "$APP/psiphon-server-export.go" "$builddir/main.go"
-    ( cd "$builddir" && go mod init foc.us/psiphon-exporter >/dev/null && go get go.etcd.io/bbolt@v1.3.11 && go build -o "$APP/psiphon-server-export" . )
+    ( export GOSUMDB=sum.golang.org GOPROXY=https://proxy.golang.org GONOSUMDB= GOPRIVATE= GOTOOLCHAIN=auto; cd "$builddir" && go mod init foc.us/psiphon-exporter >/dev/null && go get go.etcd.io/bbolt@v1.3.11 && go build -o "$APP/psiphon-server-export" . )
     rm -rf "$builddir"
     chmod 700 "$APP/psiphon-server-export"
 fi
@@ -1475,7 +1711,7 @@ python3 -m py_compile "$APP/gemini_probe.py"
 
 cat > "$APP/psiphon_autopin.py" <<'PY_MANAGER'
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v4.2.0: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v4.3.0: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import contextlib
 import datetime as dt
@@ -1524,6 +1760,90 @@ def countries(value):
     rows=value.replace(',',' ').upper().split() if isinstance(value,str) else list(value or [])
     if any(not re.fullmatch('[A-Z]{2}',x) for x in rows):raise ValueError('countries must be two-letter codes')
     return list(dict.fromkeys(rows))
+
+class GoogleGeoUnknown(RuntimeError):
+    """No Google/YouTube country was observed through the selected proxy."""
+
+def youtube_enabled():
+    return POLICY.get('youtube_mode',False) is True
+
+def geo_reason(geo,region,strict=False):
+    # RU is mandatory in YouTube mode, regardless of the ordinary deny/strict policy.
+    # The saved policies remain untouched for when YouTube mode is disabled.
+    if youtube_enabled():
+        return '' if geo=='RU' else f'YouTube requires Google=RU; got {geo or "UNKNOWN"}'
+    if geo in POLICY.get('deny_regions',['RU']):return f'Google={geo}'
+    if strict and region and geo!=region:return f'Google={geo} != requested {region}'
+    return ''
+
+def boot_id():
+    try:return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    except OSError:return ''
+
+def youtube_report(status,ip=None,geo=None,diag=None,speed=None,pin=False,detail=''):
+    if not youtube_enabled():return
+    path=DATA/'youtube-status.json';old=read_json(path,{}) or {}
+    now=dt.datetime.now(dt.timezone.utc).isoformat()
+    try:session=started_at()
+    except Exception:session=None
+    obj={'status':status,'ip':ip,'google_region':geo or 'UNKNOWN',
+         'diagnostic_id':diag,'speed_kib_s':speed,'pin_verified':bool(pin),
+         'checked_at':now,'boot_id':boot_id(),'container_started_at':session,
+         'last_success_at':old.get('last_success_at'),'detail':detail}
+    if geo=='RU' and status in ('RU VERIFIED','PIN VERIFIED'):obj['last_success_at']=now
+    atomic_json(path,obj)
+
+def youtube_observation(ip,geo,verdict,speed,reason='',pin=False,diag=None):
+    if not youtube_enabled():return
+    speed_unknown=bool(POLICY.get('min_speed_kib')) and speed is None
+    detail=reason or speed_reason(speed) or ('Speed probe UNKNOWN; awaiting a new sample' if speed_unknown else '')
+    status=('UNKNOWN' if not re.fullmatch('[A-Z]{2}',str(geo or '')) else
+            'SEARCHING' if geo!='RU' else
+            'DEGRADED' if detail else
+            'PIN VERIFIED' if pin else 'RU VERIFIED')
+    youtube_report(status,ip,geo,diag,speed,pin and status=='PIN VERIFIED',detail)
+
+def youtube_status(settings=None,live=True):
+    cfg=settings if settings is not None else POLICY
+    if not cfg.get('youtube_mode',False):return {'status':'DISABLED'}
+    obj=read_json(DATA/'youtube-status.json',{}) or {'status':'UNKNOWN'}
+    stale=obj.get('boot_id')!=boot_id()
+    try:
+        age=(dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(obj['checked_at'])).total_seconds()
+        stale=stale or not 0<=age<=max(600,2*int(cfg.get('interval',300)))
+        if live and obj.get('status') in ('RU VERIFIED','PIN VERIFIED'):
+            stale=stale or obj.get('container_started_at')!=started_at()
+    except (KeyError,ValueError,TypeError,RuntimeError,subprocess.SubprocessError,OSError):stale=True
+    if stale:
+        obj=dict(obj,last_status=obj.get('status'),status='UNKNOWN',pin_verified=False,detail='A fresh check is required after a restart or stale observation')
+    return obj
+
+def xray_routing(youtube_instance,gemini_instance):
+    """Export a fragment only. Never read or modify an Xray installation."""
+    if youtube_instance==gemini_instance:raise ValueError('YouTube and Gemini require different instances')
+    out=[];configs=[]
+    for number,tag in ((youtube_instance,'psiphon-youtube'),(gemini_instance,'psiphon-gemini')):
+        if not 1<=number<=99:raise ValueError('instance must be 1..99')
+        directory=DATA.parent/('psiphon-autopin'+('' if number==1 else f'-{number}'))
+        cfg=read_json(directory/'settings.json',{}) or {}
+        if not cfg:raise ValueError(f'Instance {number} is not installed')
+        configs.append(cfg);address=cfg.get('bind','127.0.0.1');port=int(cfg['port'])
+        if not 1024<=port<=65534:raise ValueError('invalid saved port')
+        out.append({'tag':tag,'protocol':'socks','settings':{'servers':[{'address':address,'port':port}]}})
+    yt,gm=configs
+    if not yt.get('youtube_mode') or yt.get('gemini_check'):raise ValueError('YouTube instance must enable YouTube and disable Gemini')
+    if not gm.get('gemini_check') or gm.get('youtube_mode'):raise ValueError('Gemini instance must enable Gemini and disable YouTube')
+    if yt.get('tunnel_pool',1)!=1 or not ipaddress.ip_address(yt.get('bind','127.0.0.1')).is_loopback:
+        raise ValueError('YouTube requires one tunnel on loopback')
+    ports=[set((int(c['port']),int(c['port'])+1)) if c.get('publish_http',True) else {int(c['port'])} for c in configs]
+    if ports[0]&ports[1]:raise ValueError('Instance proxy ports overlap')
+    yt_domains=['domain:youtube.com','domain:youtu.be','domain:googlevideo.com','domain:ytimg.com','full:youtubei.googleapis.com']
+    gm_domains=['domain:gemini.google.com','domain:aistudio.google.com','full:generativelanguage.googleapis.com']
+    out.append({'tag':'psiphon-quic-block','protocol':'blackhole','settings':{}})
+    rules=[{'type':'field','network':'udp','port':'443','domain':yt_domains+gm_domains,'outboundTag':'psiphon-quic-block'},
+           {'type':'field','network':'tcp','domain':yt_domains,'outboundTag':'psiphon-youtube'},
+           {'type':'field','network':'tcp','domain':gm_domains,'outboundTag':'psiphon-gemini'}]
+    return {'outbounds':out,'routing':{'domainStrategy':'AsIs','rules':rules}}
 
 def speed_reason(speed):
     floor=float(POLICY.get('min_speed_kib',0))
@@ -1581,6 +1901,10 @@ def atomic_json(p, obj):
         if st:os.chown(name,st.st_uid,st.st_gid);os.chmod(name,st.st_mode & 0o777)
         else:os.chmod(name,0o600)
         os.replace(name,p)
+        # Persist the rename as well as its contents across an unclean reboot.
+        directory=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
     finally:
         if name and os.path.exists(name):os.unlink(name)
 
@@ -1616,6 +1940,9 @@ def update_region_env(region):
             f.flush();os.fsync(f.fileno())
         os.chown(name,st.st_uid,st.st_gid);os.chmod(name,st.st_mode & 0o777)
         os.replace(name,path)
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
     finally:
         if name and os.path.exists(name):os.unlink(name)
 
@@ -1664,7 +1991,7 @@ def google_region():
         found=re.search(r'"GL"\s*:\s*"([A-Z]{2})"',page)
         if found:return found.group(1)
     except Exception as exc:log('Fast Google classifier unavailable: '+str(exc))
-    if not POLICY.get('legacy_geo_fallback',False):raise RuntimeError('Google country UNKNOWN')
+    if youtube_enabled() or not POLICY.get('legacy_geo_fallback',False):raise GoogleGeoUnknown('Google country UNKNOWN')
     script=BASE/'ipregion.sh'
     if not script.is_file():raise RuntimeError('ipregion missing')
     env=os.environ.copy()
@@ -1677,11 +2004,18 @@ def google_region():
     report=json.loads(p.stdout)
     rows=report.get('results',{}).get('custom',[])
     geo=[str(x.get('ipv4','')).strip().upper() for x in rows if x.get('service')=='Google']
-    if len(geo)!=1 or not re.fullmatch('[A-Z]{2}',geo[0]):raise RuntimeError(f'Google region UNKNOWN: {geo}')
+    if len(geo)!=1 or not re.fullmatch('[A-Z]{2}',geo[0]):raise GoogleGeoUnknown(f'Google region UNKNOWN: {geo}')
     return geo[0]
 
 def probe():
-    first=socks_ip();country=google_region();last=socks_ip()
+    first=socks_ip()
+    for attempt in range(3 if youtube_enabled() else 1):
+        try:country=google_region();break
+        except GoogleGeoUnknown:
+            if not youtube_enabled() or attempt==2:raise
+            youtube_report('UNKNOWN',ip=first,detail='Retrying Google GeoIP through SOCKS5h')
+            time.sleep(10)
+    last=socks_ip()
     if first!=last:raise RuntimeError(f'Exit changed during check: {first} -> {last}')
     log(f'Exit={last}, Google={country} [SOCKS5h]')
     return last,country
@@ -1722,17 +2056,15 @@ def evaluate_exit(region, gemini, mb, strict=False):
         except Exception as exc:log('Optional speed sample failed: '+str(exc))
     # Google classifications can differ from the server's requested country.
     # In strict mode reject *confirmed* mismatch, not an inconclusive Gemini reply.
-    denied=POLICY.get('deny_regions',['RU'])
-    reason=(f'Google={geo}' if geo in denied else 'Gemini REFUSED' if verdict=='REFUSED' else
-            'Gemini CAPTCHA' if verdict=='CAPTCHA' else
-            f'Google={geo} != requested {region}' if strict and region and geo!=region else '')
+    reason=geo_reason(geo,region,strict) or ('Gemini REFUSED' if verdict=='REFUSED' else 'Gemini CAPTCHA' if verdict=='CAPTCHA' else '')
+    youtube_observation(ip,geo,verdict,speed,reason)
     return ip,geo,verdict,speed,reason
 
 def adopt_current(region,gemini,mb,strict,observed=None,auto_pin=True):
     """Keep a healthy tunnel; recover an existing target only against the cached DB entry."""
     config=read_json(CONFIG,{}) or {}
     ip,geo,verdict,speed,reason = observed if observed is not None else evaluate_exit(region,gemini,mb,strict)
-    if reason or speed_reason(speed):return False
+    if reason or geo_reason(geo,region,strict) or speed_reason(speed):return False
     diag=connected_id()
     if config.get('TargetServerEntry'):
         staged=read_json(STATE,{}) or {}
@@ -1752,6 +2084,7 @@ def adopt_current(region,gemini,mb,strict,observed=None,auto_pin=True):
             'speed_kib_s':speed,'adopted_unpinned':False,
             'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
         remember_pin(row,region)
+        youtube_observation(ip,geo,verdict,speed,pin=True,diag=diag)
         log(f'RECOVERED VERIFIED PIN: exit={ip} Google={geo} Gemini={verdict} '
             f'server={row["server_ip"]} ID={diag}; no restart')
         return True
@@ -1759,6 +2092,7 @@ def adopt_current(region,gemini,mb,strict,observed=None,auto_pin=True):
         'diagnostic_id':diag,'server_ip':None,'gemini':verdict,
         'speed_kib_s':speed,'adopted_unpinned':True,
         'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+    youtube_observation(ip,geo,verdict,speed,diag=diag)
     log(f'ADOPTED HEALTHY exit={ip} Google={geo} Gemini={verdict} ID={diag}; no restart (not targeted pin)')
     if auto_pin:auto_pin_current(region,gemini,mb,strict)
     return True
@@ -1827,11 +2161,12 @@ def pin_prepared_verification(region,ip,geo,diag,reason,state):
     if started_at()==state.get('prepared_container_started_at'):
         log(f'Prepared pin pending next restart: {ip} Google={geo}; current tunnel unchanged')
         return True
-    if not reason and ip==state.get('ip') and diag==state.get('diagnostic_id'):
+    if not reason and not geo_reason(geo,region) and ip==state.get('ip') and diag==state.get('diagnostic_id'):
         state.update(pin_prepared=False,adopted_unpinned=False,
                      verified_at=dt.datetime.now(dt.timezone.utc).isoformat())
         state.pop('prepared_container_started_at',None)
         atomic_json(STATE,state)
+        youtube_observation(ip,geo,state.get('gemini'),state.get('speed_kib_s'),pin=True,diag=diag)
         log(f'PIN VERIFIED AFTER RESTART: exit={ip} Google={geo} ID={diag}')
         return True
     # A prepared target failed to restore the previous verified exit.
@@ -1870,7 +2205,7 @@ def collect_candidates(region):
 def auto_pin_current(region,gemini=False,mb=0,strict=False,wait=None):
     """Populate the stopped DB cache, connect to the observed server, then verify."""
     cfg=read_json(CONFIG,{}) or {};state=read_json(STATE,{}) or {}
-    if int(POLICY.get('tunnel_pool',1))!=1 or cfg.get('TargetServerEntry') or not state.get('adopted_unpinned') or speed_reason(state.get('speed_kib_s')):
+    if int(POLICY.get('tunnel_pool',1))!=1 or cfg.get('TargetServerEntry') or not state.get('adopted_unpinned') or speed_reason(state.get('speed_kib_s')) or geo_reason(state.get('google_region'),region):
         return False
     retry_path=DATA/'initial-pin-attempt.json'
     retry=read_json(retry_path,{}) or {};now=time.time()
@@ -1902,6 +2237,9 @@ def auto_pin_current(region,gemini=False,mb=0,strict=False,wait=None):
         if connected_id()!=expected:raise RuntimeError('Pinned server ID mismatch')
         time.sleep(2)
         if socks_ip()!=ip or connected_id()!=expected:raise RuntimeError('Pinned exit changed during verification')
+        if youtube_enabled():
+            confirmed_ip,confirmed_geo=probe()
+            if confirmed_ip!=ip or geo_reason(confirmed_geo,region,strict):raise RuntimeError('YouTube GeoIP changed during PIN verification')
         if (read_json(CONFIG,{}) or {}).get('TargetServerEntry')!=candidate['encoded']:
             raise RuntimeError('Configured target changed during verification')
         atomic_json(STATE,{'region':region,'ip':ip,'google_region':geo,'gemini':verdict,
@@ -1909,6 +2247,7 @@ def auto_pin_current(region,gemini=False,mb=0,strict=False,wait=None):
             'adopted_unpinned':False,'pin_prepared':False,
             'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
     except Exception as exc:
+        youtube_report('UNKNOWN' if isinstance(exc,GoogleGeoUnknown) else 'DEGRADED',detail='Initial PIN deferred: '+str(exc))
         if changed:
             atomic_json(CONFIG,cfg);atomic_json(STATE,state)
             try:docker_restart(wait)
@@ -1923,6 +2262,7 @@ def auto_pin_current(region,gemini=False,mb=0,strict=False,wait=None):
     retry_path.unlink(missing_ok=True)
     try:remember_pin(candidate,region)
     except Exception as exc:log(f'PIN verified; reserve update deferred: {type(exc).__name__}')
+    youtube_observation(ip,geo,verdict,speed,pin=True,diag=expected)
     log(f'INITIAL PIN VERIFIED: exit={ip} Google={geo} Gemini={verdict} ID={expected}; initial exit={initial_ip}')
     return True
 
@@ -1942,12 +2282,14 @@ def verify_pin_current(region,gemini=False,mb=0,strict=False):
         return False
     ip,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
     diag=connected_id()
-    if ip==state['ip'] and not reason and not speed_reason(speed) and diag==state.get('diagnostic_id'):
+    if ip==state['ip'] and not reason and not geo_reason(geo,region,strict) and not speed_reason(speed) and diag==state.get('diagnostic_id'):
+        youtube_observation(ip,geo,verdict,speed,pin=True,diag=diag)
         log(f'Existing pin healthy: {ip}, {geo}, server={diag}')
         return True
     return False
 
 def search(region,wait,delay,gemini=False,mb=0,strict=False):
+    youtube_report('SEARCHING',detail='Searching for Google GeoIP RU')
     log(f'Server rotation started: {region or "AUTO"}; unlimited cycles')
     # A CLI region override must take effect before accepting the current exit.
     if (read_json(CONFIG,{}) or {}).get('EgressRegion','')!=region:
@@ -2005,17 +2347,20 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
                 # Recheck IP/geo, without an unnecessary second Gemini request.
                 time.sleep(5)
                 second,geo2=probe()
-                if second!=first or geo2 in POLICY.get('deny_regions',['RU']) or (strict and region and geo2!=region) or connected_id()!=expected:
+                if second!=first or geo_reason(geo2,region,strict) or connected_id()!=expected:
                     raise RuntimeError(f'Pin verification unstable: {second} Google={geo2}')
                 atomic_json(STATE,{'ip':first,'google_region':geo2,'region':region,'diagnostic_id':expected,
                                    'server_ip':server,'gemini':verdict,'speed_kib_s':speed,
                                    'adopted_unpinned':False,'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
                 remember_pin(candidate,region)
+                youtube_observation(first,geo2,verdict,speed,pin=True,diag=expected)
                 log(f'PIN VERIFIED: exit={first} Google={geo2} Gemini={verdict} server={server} ID={expected}')
                 return True
             except Exception as exc:
+                youtube_report('UNKNOWN' if isinstance(exc,GoogleGeoUnknown) else 'DEGRADED',detail=str(exc))
                 log(f'Server {server} failed: {exc}')
-            time.sleep(delay)
+            finally:
+                time.sleep(delay)
         log('All candidates exhausted. Refreshing discovery and repeating in 60s...')
         clear_target(region)
         try:docker_restart(wait)
@@ -2025,7 +2370,8 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
         seen_exits.clear()
 
 def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
-    log(f'Monitor v4.2: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
+    log(f'Monitor v4.3: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
+    youtube_report('UNKNOWN',detail='Waiting for startup verification')
     failures=0;slow_count=0;slow_identity=None
     try:wait_ready(wait)
     except Exception as exc:log(f'Startup readiness pending: {exc}')
@@ -2037,6 +2383,7 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
             state=read_json(STATE,{}) or {}
             config=read_json(CONFIG,{}) or {}
             diag=connected_id()
+            youtube_observation(ip,geo,verdict,speed,reason,pin=bool(config.get('TargetServerEntry') and not state.get('adopted_unpinned',True) and not state.get('pin_prepared') and diag==state.get('diagnostic_id') and ip==state.get('ip')),diag=diag)
             identity=(ip,diag,started_at())
             if identity!=slow_identity:slow_count=0;slow_identity=identity
             slow=speed_reason(speed)
@@ -2089,6 +2436,10 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
                 log(f'Healthy exit unchanged: {ip} Google={geo} Gemini={verdict}; '
                     + ('adopted (not pinned)' if state.get('adopted_unpinned') else 'pinned'))
         except Exception as exc:
+            youtube_report('UNKNOWN' if isinstance(exc,GoogleGeoUnknown) else 'DEGRADED',detail=str(exc))
+            if youtube_enabled() and isinstance(exc,GoogleGeoUnknown):
+                log('YouTube GeoIP UNKNOWN; retrying without accepting or restarting the server')
+                failures=0;time.sleep(min(interval,30));continue
             slow_count=0
             failures+=1
             # An outage must not postpone retries for a full hourly health interval.
@@ -2117,6 +2468,7 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
 
 def pool_monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
     """Check sampled exits of a multi-tunnel pool; no single-IP PIN claim is made."""
+    if youtube_enabled():raise ValueError('YouTube mode requires a single tunnel for verified PIN')
     slow_count=0;failures=0
     log(f'Multi-tunnel monitor: {POLICY.get("tunnel_pool")} tunnels; PIN disabled')
     while True:
@@ -2191,10 +2543,12 @@ def uninstall(purge_deps=False):
         print(f'Removed instance {INSTANCE}; backups under /var/backups/psiphon-autopin are retained')
 
 def main():
-    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v4.2')
-    ap.add_argument('command',choices=['menu','check','search','monitor','status','refresh-cache','prepare-pin','set-region','set-pool','region','pool','rotate','start','stop','restart','logs','speed','uninstall','xray'])
+    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v4.3')
+    ap.add_argument('command',choices=['menu','check','search','monitor','status','refresh-cache','prepare-pin','set-region','set-pool','region','pool','rotate','start','stop','restart','logs','speed','uninstall','xray','xray-routing','update'])
     ap.add_argument('value',nargs='?')
     ap.add_argument('--instance',type=int,default=1)
+    ap.add_argument('--youtube-instance',type=int,default=1)
+    ap.add_argument('--gemini-instance',type=int,default=2)
     ap.add_argument('--purge-deps',action='store_true',help='With uninstall: remove only Docker/Go installed by Auto-Pin and no longer used')
     ap.add_argument('--region-pool',default=None)
     ap.add_argument('--deny-regions',default=None)
@@ -2219,8 +2573,8 @@ def main():
     force_rotate=(args.command=='rotate')
     if not 1<=args.instance<=99:ap.error('instance must be 1..99')
     if args.instance!=1:configure_instance(args.instance)
-    if args.command=='menu':
-        return subprocess.call([sys.executable,str(BASE/'autopin_menu.py'),'--instance',str(args.instance)])
+    if args.command in ('menu','update'):
+        return subprocess.call([sys.executable,str(BASE/'autopin_menu.py'),'--instance',str(args.instance),*(['--update'] if args.command=='update' else [])])
     if args.command in ('region','pool'):
         if args.value is None:ap.error('region/pool requires a value')
         if args.command=='region':args.region=args.value;args.command='set-region'
@@ -2232,6 +2586,7 @@ def main():
         if getattr(args,key) is None:setattr(args,key,int(settings.get(key,default)))
     global POLICY
     POLICY=dict(settings)
+    if type(POLICY.get('youtube_mode',False)) is not bool:ap.error('youtube_mode must be boolean')
     POLICY.update(interval=args.interval,wait=args.wait)
     for key,value in [('region_pool',args.region_pool),('deny_regions',args.deny_regions)]:
         if value is not None:
@@ -2260,8 +2615,14 @@ def main():
     if region and not re.fullmatch('[A-Z]{2}',region):ap.error('invalid country')
     if args.interval<60 or args.wait<20 or args.delay<2:ap.error('interval>=60 wait>=20 delay>=2')
     if not 0<=args.probe_mb<=10 or not 2<=args.fail_threshold<=20:ap.error('probe-mb 0..10, fail-threshold 2..20')
+    if args.command=='xray-routing':
+        print(json.dumps(xray_routing(args.youtube_instance,args.gemini_instance),indent=2));return 0
+    if args.command not in ('status','logs','uninstall','stop','xray') and youtube_enabled():
+        if args.gemini_check:ap.error('YouTube and Gemini require separate instances; use --no-gemini-check on the YouTube instance')
+        if int(settings.get('tunnel_pool',1))!=1:ap.error('YouTube requires --tunnel-pool 1')
+        if not ipaddress.ip_address(bind).is_loopback:ap.error('YouTube requires loopback binding')
     if args.command=='status':
-        print(json.dumps({'instance':INSTANCE,'region_pool':POLICY.get('region_pool',[]),'min_speed_kib':POLICY.get('min_speed_kib',0),'slow_threshold':POLICY.get('slow_threshold',2),'deny_regions':POLICY.get('deny_regions',['RU']),'impersonate':POLICY.get('impersonate',False),'backend':backend(),'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
+        print(json.dumps({'instance':INSTANCE,'youtube_mode':youtube_enabled(),'youtube':youtube_status(POLICY),'region_pool':POLICY.get('region_pool',[]),'min_speed_kib':POLICY.get('min_speed_kib',0),'slow_threshold':POLICY.get('slow_threshold',2),'deny_regions':POLICY.get('deny_regions',['RU']),'impersonate':POLICY.get('impersonate',False),'backend':backend(),'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
     if args.command=='xray':
         print(json.dumps({'tag':'psiphon-out'+('' if INSTANCE==1 else f'-{INSTANCE}'),'protocol':'socks','settings':{'servers':[{'address':bind,'port':port}]}},indent=2));return 0
     if args.command=='uninstall':uninstall(args.purge_deps);return 0
@@ -2274,7 +2635,11 @@ def main():
         if args.command!='stop':run(['systemctl','start',monitor_unit()])
         return 0
     if args.command=='check':
-        _,_,_,speed,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
+        try:
+            ip,geo,verdict,speed,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
+            youtube_observation(ip,geo,verdict,speed,reason)
+        except Exception as exc:
+            youtube_report('UNKNOWN' if isinstance(exc,GoogleGeoUnknown) else 'DEGRADED',detail=str(exc));raise
         return 2 if reason or speed_reason(speed) else 0
     DATA.mkdir(parents=True,exist_ok=True)
     resume_monitor=False
@@ -2337,7 +2702,7 @@ if __name__=='__main__':
 PY_MANAGER
 chmod 700 "$APP/psiphon_autopin.py"
 python3 -m py_compile "$APP/psiphon_autopin.py"
-python3 - "$DATA/settings.json" "$REGION" "$SOCKS_PORT" "$GEMINI_CHECK" "$PROBE_MB" "$STRICT_REGION" "$FAIL_THRESHOLD" "$BACKEND" "$REGION_POOL" "$DENY_REGIONS" "$MIN_SPEED" "$SLOW_THRESHOLD" "$IMPERSONATE" "$TUNNEL_POOL" "$INSTANCE" "$INTERVAL" "$WAIT" "$DELAY" "$BIND" "$PUBLISH_HTTP" "$CONNECTION" "$MENU_MODE" <<'SETTINGS'
+python3 - "$DATA/settings.json" "$REGION" "$SOCKS_PORT" "$GEMINI_CHECK" "$PROBE_MB" "$STRICT_REGION" "$FAIL_THRESHOLD" "$BACKEND" "$REGION_POOL" "$DENY_REGIONS" "$MIN_SPEED" "$SLOW_THRESHOLD" "$IMPERSONATE" "$TUNNEL_POOL" "$INSTANCE" "$INTERVAL" "$WAIT" "$DELAY" "$BIND" "$PUBLISH_HTTP" "$CONNECTION" "$MENU_MODE" "$YOUTUBE_MODE" <<'SETTINGS'
 import json,sys
 obj={'region':sys.argv[2],'port':int(sys.argv[3]),
      'gemini_check':bool(int(sys.argv[4])),'probe_mb':int(sys.argv[5]),
@@ -2346,7 +2711,7 @@ obj={'region':sys.argv[2],'port':int(sys.argv[3]),
      'deny_regions':sys.argv[10].split(),'min_speed_kib':float(sys.argv[11]),
      'slow_threshold':int(sys.argv[12]),'impersonate':bool(int(sys.argv[13])),
      'tunnel_pool':int(sys.argv[14]),'instance':int(sys.argv[15]),
-     'interval':int(sys.argv[16]),'wait':int(sys.argv[17]),'delay':int(sys.argv[18]),'bind':sys.argv[19],'publish_http':bool(int(sys.argv[20])),'connection_type':sys.argv[21],'menu_mode':sys.argv[22]}
+     'interval':int(sys.argv[16]),'wait':int(sys.argv[17]),'delay':int(sys.argv[18]),'bind':sys.argv[19],'publish_http':bool(int(sys.argv[20])),'connection_type':sys.argv[21],'menu_mode':sys.argv[22],'youtube_mode':bool(int(sys.argv[23]))}
 with open(sys.argv[1],'w') as f:json.dump(obj,f,indent=2);f.write('\n')
 SETTINGS
 chmod 600 "$DATA/settings.json"
@@ -2357,7 +2722,7 @@ write_menu_module > "$APP/autopin_menu.py"
 chmod 700 "$APP/autopin_menu.py"
 installer_tmp=$(mktemp "$APP/installer.XXXXXX")
 {
-    printf '#!/usr/bin/env bash\n# Forcus Auto-Pin offline installer v4.2.0\n'
+    printf '#!/usr/bin/env bash\n# Forcus Auto-Pin offline installer v4.3.0\n'
     declare -f autopin_install_main
     printf '\nautopin_install_main "$@"\n'
 } > "$installer_tmp"
@@ -2367,11 +2732,21 @@ cat > /usr/local/sbin/auto-pin <<'MENU_LAUNCHER'
 #!/usr/bin/env bash
 # Managed by Forcus Auto-Pin menu
 set -euo pipefail
-for menu_module in /opt/psiphon-autopin/autopin_menu.py /opt/psiphon-autopin-[0-9]*/autopin_menu.py; do
-    if [[ -f $menu_module ]]; then exec python3 "$menu_module" "$@"; fi
-done
-echo 'Auto-Pin menu is not installed. Run install_psiphon_autopin.sh first.' >&2
-exit 1
+# Prefer the newest installed UI even when the first instance has not been updated yet.
+menu_module=$(python3 - <<'SELECT_MENU'
+from pathlib import Path
+import re
+paths=[p for p in Path('/opt').glob('psiphon-autopin*/autopin_menu.py') if p.is_file()]
+def key(path):
+    try:
+        found=re.search(r"^VERSION='([0-9]+\.[0-9]+\.[0-9]+)'$",path.read_text(),re.M)
+        return (tuple(map(int,found.group(1).split('.'))) if found else (0,0,0),str(path))
+    except OSError:return ((0,0,0),str(path))
+if not paths:raise SystemExit('Auto-Pin menu is not installed. Run install_psiphon_autopin.sh first.')
+print(max(paths,key=key))
+SELECT_MENU
+)
+exec python3 "$menu_module" "$@"
 MENU_LAUNCHER
 chmod 755 /usr/local/sbin/auto-pin
 python3 - "$APP" "$INSTANCE" <<'MENU_CONNECTION'
@@ -2388,17 +2763,34 @@ TUNNEL_DEP=''
 if [[ $BACKEND == vps-psiphon ]]; then TUNNEL_DEP="$CONTAINER.service"; fi
 cat > "/etc/systemd/system/$MONITOR" <<EOF
 [Unit]
-Description=Forcus Psiphon Auto-Pin v4.2.0 server rotation and Google geo monitor
+Description=Forcus Psiphon Auto-Pin v4.3.0 server rotation and Google geo monitor
 Wants=network-online.target $TUNNEL_DEP
 After=network-online.target docker.service $TUNNEL_DEP
 Requires=docker.service
+PartOf=docker.service
 StartLimitIntervalSec=0
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 $APP/psiphon_autopin.py monitor --instance $INSTANCE --interval $INTERVAL --wait $WAIT --delay $DELAY $EXTRA_FLAGS
 Restart=always
 RestartSec=30
+UMask=0077
 NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+ReadWritePaths=$DATA $CONF /etc/default
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -2410,12 +2802,12 @@ exec /usr/bin/python3 "$APP/psiphon_autopin.py" "\$@" --instance $INSTANCE
 EOF
     chmod 755 "/usr/local/sbin/$alias"
 done
-# Confirm that both proxy sockets are bound only to loopback before enabling monitoring.
+# Confirm proxy sockets match the configured binding before enabling monitoring.
 # A slow Psiphon tunnel need not be ready yet; listener visibility is checked for up to 20s.
 for _ in $(seq 1 20); do
     verify_proxy_binding
     if proxy_listeners_ready; then
-        echo '[OK] Both proxies are published only on loopback.'
+        echo "[OK] Configured proxies are published on $BIND."
         break
     fi
     sleep 1
@@ -2429,7 +2821,7 @@ fi
 systemctl daemon-reload
 systemctl enable "$MONITOR"
 systemctl restart "$MONITOR"
-printf '\n[OK] Forcus Psiphon Auto-Pin v4.2.0 installed\n'
+printf '\n[OK] Forcus Psiphon Auto-Pin v4.3.0 installed\n'
 echo '[OK] Existing healthy unpinned exits are retained; targeted pinning remains available.'
 echo "[OK] Gemini checks: $GEMINI_CHECK; optional throughput sample: ${PROBE_MB} MiB; strict region: $STRICT_REGION."
 echo "[OK] SOCKS5h: $BIND:$SOCKS_PORT (Google and IP checks through proxy)."
@@ -2443,5 +2835,6 @@ if [[ $CONNECTION == xray ]]; then
     cat "$DATA/xray-outbound.json"
     echo 'Add the outbound and routing to Xray; its process must be able to reach the published address.'
 fi
+autopin_return_to_menu
 }
 autopin_install_main "$@"

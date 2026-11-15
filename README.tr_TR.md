@@ -6,7 +6,7 @@
 
 **Yerel SOCKS5 · otomatik PIN · Google/Gemini denetimi · kurtarma**
 
-![Version](https://img.shields.io/badge/version-4.2.0-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.0-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -18,11 +18,15 @@ Linux VPS için Psiphon yöneticisi. Kurun, Easy veya Advanced seçin ve bağım
 
 [Hızlı Başlangıç](#quick-start) · [Özellikler](#features) · [Konsol Menüsü](#menu) · [Komut Listesi](#commands) · [Xray Entegrasyonu](#xray) · [Güncelleme ve İşletim](#operations) · [Kaldırma](#uninstall) · [Sık Sorulan Sorular](#faq)
 
+[YouTube Mode](#youtube) · [Güvenlik](#security)
+
 <a id="quick-start"></a>
 
 ## Hızlı Başlangıç
 
 Komutları Bash içinde root olarak çalıştırın. Ubuntu/Debian x86_64 ve systemd desteklenir; İnternet ve curl gerekir. Kurucu eksik Docker/Go bağımlılıklarını yükler, mevcut kurulumları korur.
+
+Dışa aktarıcı Go 1.22 ister; Go 1.21+ doğrulanmış yeni toolchain seçebilir. Daha eski Go, servisler durdurulmadan reddedilir ve mevcut kurulum değiştirilmez.
 
 Kurucuyu indirip çalıştırın. Terminalde parametresiz çalıştırma menüyü açar:
 
@@ -57,7 +61,13 @@ Belgeler yedi dilde sunulur. Konsol menüsünün etiketleri şu anda Rusçadır;
 
 ## Konsol Menüsü
 
+Etkileşimli kurulum veya uygulamadan sonra seçili örneğin ana auto-pin menüsü otomatik açılır. IP araması/denetimi sürüyorsa açıkça belirtilir; servis başlangıcı doğrulanmış çıkış demek değildir. Yeni ağ testi başlatmadan kayıtlı sonucu yenilemek için **r** kullanın. Etkileşimsiz otomasyon normal biter.
+
 **Easy:** ülke, bağlantı çıktısı, Gemini, SOCKS portu ve dakika olarak watchdog. **Advanced:** tüm kurulum seçenekleri. Ana menünün 3 ve 4 numaralı maddeleri işlemler ve örnek seçimi içindir.
+
+Easy madde **6** ve Advanced içinde **YouTube Mode** bulunur. Watchdog, Easy madde 5 olarak kalır. Gemini açıksa menü boş portlu bağımsız örnek önerir. Asıl örnek değiştirilmez; mevcut modu değiştirmek açık seçim ve onay gerektirir.
+
+YouTube açıkken Easy, video hız eşiği için **7** numaralı maddeyi ekler.
 
 Enter değeri korur; `-` ülke listesini temizler. Latin `y` ayarları gösterir ve `y/n` onayından sonra uygular. İptal mevcut ayarları korur. Uygulama seçili tüneli yeniden bağlayabilir; Easy gizli Advanced değerlerini korur.
 
@@ -69,6 +79,10 @@ Alt bilgi kayıtlı sonuçları gösterir; menüyü açmak yeni ağ testi yapmaz
 Güncel menü oluşturucusundan örnek çıktı; adresler ve durumlar gösterim amaçlıdır.
 
 ![Menü önizlemesi](docs/assets/menu-preview.png)
+
+![Easy Mode — YouTube](docs/assets/easy-mode-preview.png)
+
+[Easy Mode (.txt)](docs/assets/easy-mode-demo.txt)
 
 [Menü önizlemesi (.txt)](docs/assets/menu-demo.txt)
 
@@ -133,6 +147,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-M
 
 | Komut | İşlev |
 | --- | --- |
+| `psiphon-autopin xray-routing --youtube-instance 2 --gemini-instance 1` | Kayıtlı portlarla yönlendirme dışa aktarma. |
+| `psiphon-autopin update` | auto-pin üzerinden güncelleme. |
 | `auto-pin` | Ayar ve yönetim menüsünü açar. |
 | `auto-pin --instance 2` | Örnek 2 menüsünü açar. |
 | `psiphon-autopin status` | Kayıtlı ayarları ve son sonucu gösterir. |
@@ -163,6 +179,57 @@ psiphon-autopin set-pool --region-pool NL,DE
 ```
 
 `check` çıkış kodları: **0** kabul edildi, **2** düşük hız dahil politika reddi, **1** denetim/çalışma hatası. Kabul edilen sonuç Gemini `INCONCLUSIVE` içerebilir.
+
+<a id="youtube"></a>
+
+## YouTube Mode
+
+İsteğe bağlıdır, **varsayılan olarak kapalıdır**. Yalnızca bu örneğin SOCKS5h bağlantısından YouTube sayfasında görülen **Google GeoIP = RU** kabul edilir. Reklamsızlık değil, ülke ve sunucu PINi doğrulanır.
+
+YouTube bir tünel, loopback ve o örnekte kapalı Gemini gerektirir. Psiphon ülkesi AUTO veya seçilen ülke olabilir; otomatik RU yapılmaz. Zorunlu Google RU, normal deny/strict kabulünü geçersiz kılar; kayıtlı değerler silinmez. UNKNOWN tekrar denenir, kabul edilmez. Beklemeler, hız eşikleri, önbellek, yedek adaylar ve PIN doğrulaması korunur.
+
+Yeni YouTube örneklerinin varsayılanı **1500 KiB/s ≈ 12,3 Mbps** olur. Kayıtlı veya açıkça verilen değerler korunur. **4 MiB örnek boyutudur**, hız eşiği değildir. YouTube açıkken Easy madde **7** video hız eşiğini ayarlar; Advanced ve --min-speed de kullanılabilir. Kısa ölçüm sürekli video kalitesini garanti etmez.
+
+Temiz VPS örneği: Gemini örnek 1 (40000), YouTube örnek 2 (40002). Mevcut sistemde çalışan Gemini ayarlarını koruyup boş numara/port seçin. Aşağıdaki Gemini komutu ilk kurulum içindir.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh -o /tmp/install_psiphon_autopin.sh
+```
+
+### Gemini örneği
+
+```bash
+bash /tmp/install_psiphon_autopin.sh --instance 1 --region NL --gemini-check --no-youtube-mode
+```
+
+### YouTube örneği
+
+```bash
+bash /tmp/install_psiphon_autopin.sh --instance 2 --region AUTO --youtube-mode --no-gemini-check --tunnel-pool 1
+```
+
+Menüden veya kurucuyu --instance 2 --no-youtube-mode ile yeniden çalıştırarak kapatın. Diğer örnekler ve mevcut Gemini tercihi değişmez. Eski JSON içinde youtube_mode yoksa false kabul edilir. YouTube kapalıyken 2–32 tünel havuzları kullanılabilir.
+
+Durum gözlenen IP, Google ülkesi, ID, hız, PIN ve son başarılı RU denetimini içerir. İşletim sistemi/konteyner yeniden başladıktan veya sonuç eskidikten sonra yeni doğrulama gerekir.
+
+| Status | İşlev |
+| --- | --- |
+| `DISABLED` | Kapalı. |
+| `SEARCHING` | Google RU aranıyor. |
+| `RU VERIFIED` | RU doğrulandı; PIN henüz doğrulanmadı. |
+| `PIN VERIFIED` | RU ve seçilen sunucu PINi doğrulandı. |
+| `DEGRADED` | Bağlantı veya hız sorunu. |
+| `UNKNOWN` | Güvenilir güncel GeoIP sonucu yok. |
+
+### Kayıtlı portlarla yönlendirme dışa aktarma
+
+```bash
+psiphon-autopin xray-routing --youtube-instance 2 --gemini-instance 1
+```
+
+Outbounds öğelerini **mevcut varsayılan outbound sonrasına**, alan adı kurallarını genel kurallardan önceye ekleyin. Gerçek inbounds üzerinde sniffing açın veya hedef alan adlarını SOCKS/VLESS ile iletin. Docker içindeki Xray için host ağı kullanın. TCP proxyleri QUIC taşımaz; örnek yalnız seçilen servis alanlarında UDP/443 engelleyerek TCPye dönüşe izin verir. Gizli/şifreli adlar her zaman tanınamaz. Xray otomatik değiştirilmez.
+
+[JSON + sniffing](docs/xray/README.md)
 
 <a id="xray"></a>
 
@@ -199,6 +266,7 @@ Yeni `auto` kurulumunda `vps-psiphon` seçilir; tanınan mevcut backend korunur.
 
 | Seçenek | Varsayılan | İşlev |
 | --- | --- | --- |
+| `--youtube-mode` / `--no-youtube-mode` | kapalı | Zorunlu Google RU ve tek tünelde doğrulanmış PIN; aynı örnekte Gemini ile çakışır. |
 | `--region NL / --region AUTO / --region NL,DE` | menü / gözetimsiz kurulumda gerekli (NL) | İki harfli Psiphon ülkesi, AUTO veya virgüllü ülke havuzu. |
 | `--instance N` | 1 | 1–99 arasında örnek seçer. |
 | `--port N` | 40000 + 2 × (N−1) | SOCKS portu 1024–65534; HTTP sonraki porttur. |
@@ -215,7 +283,7 @@ Yeni `auto` kurulumunda `vps-psiphon` seçilir; tanınan mevcut backend korunur.
 | `--interval N` | 300 s | Normal denetim aralığı saniye; en az 60. |
 | `--wait N` | 75 s | Hazır olma süresi saniye; en az 20. |
 | `--delay N` | 12 s | Arama denemeleri arası saniye; en az 2. |
-| `--min-speed N` | 800 KiB/s | KiB/s eşiği; 0 hız rotasyonunu kapatır. |
+| `--min-speed N` | 800 / 1500 (YouTube) KiB/s | KiB/s eşiği; 0 hız rotasyonunu kapatır. |
 | `--probe-mb N` | 4 MiB | 0–10 MiB örnek; 0 ve açık eşik durumunda sayfa ölçülür. |
 | `--slow-threshold N` | 2 | Rotasyon öncesi art arda yavaş ölçümler, 2–20. |
 | `--fail-threshold N` | 3 | Kurtarma öncesi art arda hatalar, 2–20. |
@@ -229,6 +297,20 @@ Yeni `auto` kurulumunda `vps-psiphon` seçilir; tanınan mevcut backend korunur.
 <a id="operations"></a>
 
 ## Güncelleme ve İşletim
+
+### auto-pin üzerinden güncelleme
+
+Ana menü **5 — Update Auto-Pin (GitHub)** seçili kurulu örneği kayıtlı ayarlarını koruyarak günceller. Diğer örnekler değişmez; onları madde 4 ile seçin. Main sabit commite çözülür, Git blob ve Bash sözdizimi doğrulanır, sürüm/commit/SHA-256 gösterilir ve onay istenir. Ağ veya doğrulama hatasında kurucu çalıştırılmaz. Eski sürüm reddedilir. Başarı sonrasında güncel ana menü otomatik açılır.
+
+Bu komutlar aynı onaylı güncellemeyi açar. Önce bu sürüm kurulmalıdır; kullanmadan önce sürümün tüm dosyalarını GitHub deponuza yükleyin.
+
+```bash
+auto-pin --update
+psiphon-autopin update
+psiphon-autopin-2 update
+```
+
+En yeni kurulu menü seçilir; ilk örneğin eski olması yeni özellikleri gizlemez.
 
 ### Mevcut örneği güncelleme
 
@@ -354,6 +436,8 @@ Yollar örnek 1 içindir. Diğer örneklerin uygulama, veri ve ayar dizinlerine 
 
 | Yol | İşlev |
 | --- | --- |
+| `/var/lib/psiphon-autopin/youtube-status.json` | Son YouTube gözlemi ve güncellik bilgisi. |
+| `/var/lib/psiphon-autopin/update-source.json` | Son başarılı menü güncellemesinin commiti ve kaynak toplamı. |
 | `/var/lib/psiphon-autopin/settings.json` | Etkin ayarlar ve menü tercihleri. |
 | `/var/lib/psiphon-autopin/state.json` | Son monitör sonucu ve PIN durumu. |
 | `/opt/vps-psiphon/config/psiphon.config` | Özel Psiphon ayarları ve hedef kaydı. |
@@ -362,6 +446,14 @@ Yollar örnek 1 içindir. Diğer örneklerin uygulama, veri ve ayar dizinlerine 
 | `/var/lib/psiphon-autopin/xray-outbound.json` | Seçilmişse Xray outbound dosyası. |
 | `/var/lib/psiphon-autopin-system/dependencies.json` | Docker/Go sahiplik kaydı, 0600 izinleri. |
 | `/var/backups/psiphon-autopin` | Geçiş ve kurtarma yedekleri. |
+
+<a id="security"></a>
+
+## Güvenlik
+
+Psiphon ve Debian imajları digest ile sabitlenir. ConsoleClient sabit committen alınır ve güncellemeler dahil kullanım öncesi SHA-256 doğrulanır. Konteynerler UID 1000, sıfır capability, salt okunur kök ve no-new-privileges kullanır. systemd dosya ve yetkileri sınırlar; Docker yöneticisi hâlâ roota eşdeğer hak ister. YouTube dışında açıkça seçilen özel --bind korunur. Güvenlik notlarına bakın.
+
+[SECURITY.md](SECURITY.md) · [SECURITY.ru_RU.md](SECURITY.ru_RU.md)
 
 <a id="development"></a>
 

@@ -1,0 +1,76 @@
+{
+  "outbounds": [
+    {
+      "tag": "psiphon-youtube",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "127.0.0.1",
+            "port": 40002
+          }
+        ]
+      }
+    },
+    {
+      "tag": "psiphon-gemini",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "127.0.0.1",
+            "port": 40000
+          }
+        ]
+      }
+    },
+    {
+      "tag": "psiphon-quic-block",
+      "protocol": "blackhole",
+      "settings": {}
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "network": "udp",
+        "port": "443",
+        "domain": [
+          "domain:youtube.com",
+          "domain:youtu.be",
+          "domain:googlevideo.com",
+          "domain:ytimg.com",
+          "full:youtubei.googleapis.com",
+          "domain:gemini.google.com",
+          "domain:aistudio.google.com",
+          "full:generativelanguage.googleapis.com"
+        ],
+        "outboundTag": "psiphon-quic-block"
+      },
+      {
+        "type": "field",
+        "network": "tcp",
+        "domain": [
+          "domain:youtube.com",
+          "domain:youtu.be",
+          "domain:googlevideo.com",
+          "domain:ytimg.com",
+          "full:youtubei.googleapis.com"
+        ],
+        "outboundTag": "psiphon-youtube"
+      },
+      {
+        "type": "field",
+        "network": "tcp",
+        "domain": [
+          "domain:gemini.google.com",
+          "domain:aistudio.google.com",
+          "full:generativelanguage.googleapis.com"
+        ],
+        "outboundTag": "psiphon-gemini"
+      }
+    ]
+  }
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forcus Psiphon Auto-Pin v4.2.0: controlled server selection + SOCKS-only geolocation."""
+"""Forcus Psiphon Auto-Pin v4.3.0: controlled server selection + SOCKS-only geolocation."""
 import argparse
 import contextlib
 import datetime as dt
@@ -48,6 +48,90 @@ def countries(value):
     rows=value.replace(',',' ').upper().split() if isinstance(value,str) else list(value or [])
     if any(not re.fullmatch('[A-Z]{2}',x) for x in rows):raise ValueError('countries must be two-letter codes')
     return list(dict.fromkeys(rows))
+
+class GoogleGeoUnknown(RuntimeError):
+    """No Google/YouTube country was observed through the selected proxy."""
+
+def youtube_enabled():
+    return POLICY.get('youtube_mode',False) is True
+
+def geo_reason(geo,region,strict=False):
+    # RU is mandatory in YouTube mode, regardless of the ordinary deny/strict policy.
+    # The saved policies remain untouched for when YouTube mode is disabled.
+    if youtube_enabled():
+        return '' if geo=='RU' else f'YouTube requires Google=RU; got {geo or "UNKNOWN"}'
+    if geo in POLICY.get('deny_regions',['RU']):return f'Google={geo}'
+    if strict and region and geo!=region:return f'Google={geo} != requested {region}'
+    return ''
+
+def boot_id():
+    try:return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    except OSError:return ''
+
+def youtube_report(status,ip=None,geo=None,diag=None,speed=None,pin=False,detail=''):
+    if not youtube_enabled():return
+    path=DATA/'youtube-status.json';old=read_json(path,{}) or {}
+    now=dt.datetime.now(dt.timezone.utc).isoformat()
+    try:session=started_at()
+    except Exception:session=None
+    obj={'status':status,'ip':ip,'google_region':geo or 'UNKNOWN',
+         'diagnostic_id':diag,'speed_kib_s':speed,'pin_verified':bool(pin),
+         'checked_at':now,'boot_id':boot_id(),'container_started_at':session,
+         'last_success_at':old.get('last_success_at'),'detail':detail}
+    if geo=='RU' and status in ('RU VERIFIED','PIN VERIFIED'):obj['last_success_at']=now
+    atomic_json(path,obj)
+
+def youtube_observation(ip,geo,verdict,speed,reason='',pin=False,diag=None):
+    if not youtube_enabled():return
+    speed_unknown=bool(POLICY.get('min_speed_kib')) and speed is None
+    detail=reason or speed_reason(speed) or ('Speed probe UNKNOWN; awaiting a new sample' if speed_unknown else '')
+    status=('UNKNOWN' if not re.fullmatch('[A-Z]{2}',str(geo or '')) else
+            'SEARCHING' if geo!='RU' else
+            'DEGRADED' if detail else
+            'PIN VERIFIED' if pin else 'RU VERIFIED')
+    youtube_report(status,ip,geo,diag,speed,pin and status=='PIN VERIFIED',detail)
+
+def youtube_status(settings=None,live=True):
+    cfg=settings if settings is not None else POLICY
+    if not cfg.get('youtube_mode',False):return {'status':'DISABLED'}
+    obj=read_json(DATA/'youtube-status.json',{}) or {'status':'UNKNOWN'}
+    stale=obj.get('boot_id')!=boot_id()
+    try:
+        age=(dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(obj['checked_at'])).total_seconds()
+        stale=stale or not 0<=age<=max(600,2*int(cfg.get('interval',300)))
+        if live and obj.get('status') in ('RU VERIFIED','PIN VERIFIED'):
+            stale=stale or obj.get('container_started_at')!=started_at()
+    except (KeyError,ValueError,TypeError,RuntimeError,subprocess.SubprocessError,OSError):stale=True
+    if stale:
+        obj=dict(obj,last_status=obj.get('status'),status='UNKNOWN',pin_verified=False,detail='A fresh check is required after a restart or stale observation')
+    return obj
+
+def xray_routing(youtube_instance,gemini_instance):
+    """Export a fragment only. Never read or modify an Xray installation."""
+    if youtube_instance==gemini_instance:raise ValueError('YouTube and Gemini require different instances')
+    out=[];configs=[]
+    for number,tag in ((youtube_instance,'psiphon-youtube'),(gemini_instance,'psiphon-gemini')):
+        if not 1<=number<=99:raise ValueError('instance must be 1..99')
+        directory=DATA.parent/('psiphon-autopin'+('' if number==1 else f'-{number}'))
+        cfg=read_json(directory/'settings.json',{}) or {}
+        if not cfg:raise ValueError(f'Instance {number} is not installed')
+        configs.append(cfg);address=cfg.get('bind','127.0.0.1');port=int(cfg['port'])
+        if not 1024<=port<=65534:raise ValueError('invalid saved port')
+        out.append({'tag':tag,'protocol':'socks','settings':{'servers':[{'address':address,'port':port}]}})
+    yt,gm=configs
+    if not yt.get('youtube_mode') or yt.get('gemini_check'):raise ValueError('YouTube instance must enable YouTube and disable Gemini')
+    if not gm.get('gemini_check') or gm.get('youtube_mode'):raise ValueError('Gemini instance must enable Gemini and disable YouTube')
+    if yt.get('tunnel_pool',1)!=1 or not ipaddress.ip_address(yt.get('bind','127.0.0.1')).is_loopback:
+        raise ValueError('YouTube requires one tunnel on loopback')
+    ports=[set((int(c['port']),int(c['port'])+1)) if c.get('publish_http',True) else {int(c['port'])} for c in configs]
+    if ports[0]&ports[1]:raise ValueError('Instance proxy ports overlap')
+    yt_domains=['domain:youtube.com','domain:youtu.be','domain:googlevideo.com','domain:ytimg.com','full:youtubei.googleapis.com']
+    gm_domains=['domain:gemini.google.com','domain:aistudio.google.com','full:generativelanguage.googleapis.com']
+    out.append({'tag':'psiphon-quic-block','protocol':'blackhole','settings':{}})
+    rules=[{'type':'field','network':'udp','port':'443','domain':yt_domains+gm_domains,'outboundTag':'psiphon-quic-block'},
+           {'type':'field','network':'tcp','domain':yt_domains,'outboundTag':'psiphon-youtube'},
+           {'type':'field','network':'tcp','domain':gm_domains,'outboundTag':'psiphon-gemini'}]
+    return {'outbounds':out,'routing':{'domainStrategy':'AsIs','rules':rules}}
 
 def speed_reason(speed):
     floor=float(POLICY.get('min_speed_kib',0))
@@ -105,6 +189,10 @@ def atomic_json(p, obj):
         if st:os.chown(name,st.st_uid,st.st_gid);os.chmod(name,st.st_mode & 0o777)
         else:os.chmod(name,0o600)
         os.replace(name,p)
+        # Persist the rename as well as its contents across an unclean reboot.
+        directory=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
     finally:
         if name and os.path.exists(name):os.unlink(name)
 
@@ -140,6 +228,9 @@ def update_region_env(region):
             f.flush();os.fsync(f.fileno())
         os.chown(name,st.st_uid,st.st_gid);os.chmod(name,st.st_mode & 0o777)
         os.replace(name,path)
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
     finally:
         if name and os.path.exists(name):os.unlink(name)
 
@@ -188,7 +279,7 @@ def google_region():
         found=re.search(r'"GL"\s*:\s*"([A-Z]{2})"',page)
         if found:return found.group(1)
     except Exception as exc:log('Fast Google classifier unavailable: '+str(exc))
-    if not POLICY.get('legacy_geo_fallback',False):raise RuntimeError('Google country UNKNOWN')
+    if youtube_enabled() or not POLICY.get('legacy_geo_fallback',False):raise GoogleGeoUnknown('Google country UNKNOWN')
     script=BASE/'ipregion.sh'
     if not script.is_file():raise RuntimeError('ipregion missing')
     env=os.environ.copy()
@@ -201,11 +292,18 @@ def google_region():
     report=json.loads(p.stdout)
     rows=report.get('results',{}).get('custom',[])
     geo=[str(x.get('ipv4','')).strip().upper() for x in rows if x.get('service')=='Google']
-    if len(geo)!=1 or not re.fullmatch('[A-Z]{2}',geo[0]):raise RuntimeError(f'Google region UNKNOWN: {geo}')
+    if len(geo)!=1 or not re.fullmatch('[A-Z]{2}',geo[0]):raise GoogleGeoUnknown(f'Google region UNKNOWN: {geo}')
     return geo[0]
 
 def probe():
-    first=socks_ip();country=google_region();last=socks_ip()
+    first=socks_ip()
+    for attempt in range(3 if youtube_enabled() else 1):
+        try:country=google_region();break
+        except GoogleGeoUnknown:
+            if not youtube_enabled() or attempt==2:raise
+            youtube_report('UNKNOWN',ip=first,detail='Retrying Google GeoIP through SOCKS5h')
+            time.sleep(10)
+    last=socks_ip()
     if first!=last:raise RuntimeError(f'Exit changed during check: {first} -> {last}')
     log(f'Exit={last}, Google={country} [SOCKS5h]')
     return last,country
@@ -246,17 +344,15 @@ def evaluate_exit(region, gemini, mb, strict=False):
         except Exception as exc:log('Optional speed sample failed: '+str(exc))
     # Google classifications can differ from the server's requested country.
     # In strict mode reject *confirmed* mismatch, not an inconclusive Gemini reply.
-    denied=POLICY.get('deny_regions',['RU'])
-    reason=(f'Google={geo}' if geo in denied else 'Gemini REFUSED' if verdict=='REFUSED' else
-            'Gemini CAPTCHA' if verdict=='CAPTCHA' else
-            f'Google={geo} != requested {region}' if strict and region and geo!=region else '')
+    reason=geo_reason(geo,region,strict) or ('Gemini REFUSED' if verdict=='REFUSED' else 'Gemini CAPTCHA' if verdict=='CAPTCHA' else '')
+    youtube_observation(ip,geo,verdict,speed,reason)
     return ip,geo,verdict,speed,reason
 
 def adopt_current(region,gemini,mb,strict,observed=None,auto_pin=True):
     """Keep a healthy tunnel; recover an existing target only against the cached DB entry."""
     config=read_json(CONFIG,{}) or {}
     ip,geo,verdict,speed,reason = observed if observed is not None else evaluate_exit(region,gemini,mb,strict)
-    if reason or speed_reason(speed):return False
+    if reason or geo_reason(geo,region,strict) or speed_reason(speed):return False
     diag=connected_id()
     if config.get('TargetServerEntry'):
         staged=read_json(STATE,{}) or {}
@@ -276,6 +372,7 @@ def adopt_current(region,gemini,mb,strict,observed=None,auto_pin=True):
             'speed_kib_s':speed,'adopted_unpinned':False,
             'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
         remember_pin(row,region)
+        youtube_observation(ip,geo,verdict,speed,pin=True,diag=diag)
         log(f'RECOVERED VERIFIED PIN: exit={ip} Google={geo} Gemini={verdict} '
             f'server={row["server_ip"]} ID={diag}; no restart')
         return True
@@ -283,6 +380,7 @@ def adopt_current(region,gemini,mb,strict,observed=None,auto_pin=True):
         'diagnostic_id':diag,'server_ip':None,'gemini':verdict,
         'speed_kib_s':speed,'adopted_unpinned':True,
         'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
+    youtube_observation(ip,geo,verdict,speed,diag=diag)
     log(f'ADOPTED HEALTHY exit={ip} Google={geo} Gemini={verdict} ID={diag}; no restart (not targeted pin)')
     if auto_pin:auto_pin_current(region,gemini,mb,strict)
     return True
@@ -351,11 +449,12 @@ def pin_prepared_verification(region,ip,geo,diag,reason,state):
     if started_at()==state.get('prepared_container_started_at'):
         log(f'Prepared pin pending next restart: {ip} Google={geo}; current tunnel unchanged')
         return True
-    if not reason and ip==state.get('ip') and diag==state.get('diagnostic_id'):
+    if not reason and not geo_reason(geo,region) and ip==state.get('ip') and diag==state.get('diagnostic_id'):
         state.update(pin_prepared=False,adopted_unpinned=False,
                      verified_at=dt.datetime.now(dt.timezone.utc).isoformat())
         state.pop('prepared_container_started_at',None)
         atomic_json(STATE,state)
+        youtube_observation(ip,geo,state.get('gemini'),state.get('speed_kib_s'),pin=True,diag=diag)
         log(f'PIN VERIFIED AFTER RESTART: exit={ip} Google={geo} ID={diag}')
         return True
     # A prepared target failed to restore the previous verified exit.
@@ -394,7 +493,7 @@ def collect_candidates(region):
 def auto_pin_current(region,gemini=False,mb=0,strict=False,wait=None):
     """Populate the stopped DB cache, connect to the observed server, then verify."""
     cfg=read_json(CONFIG,{}) or {};state=read_json(STATE,{}) or {}
-    if int(POLICY.get('tunnel_pool',1))!=1 or cfg.get('TargetServerEntry') or not state.get('adopted_unpinned') or speed_reason(state.get('speed_kib_s')):
+    if int(POLICY.get('tunnel_pool',1))!=1 or cfg.get('TargetServerEntry') or not state.get('adopted_unpinned') or speed_reason(state.get('speed_kib_s')) or geo_reason(state.get('google_region'),region):
         return False
     retry_path=DATA/'initial-pin-attempt.json'
     retry=read_json(retry_path,{}) or {};now=time.time()
@@ -426,6 +525,9 @@ def auto_pin_current(region,gemini=False,mb=0,strict=False,wait=None):
         if connected_id()!=expected:raise RuntimeError('Pinned server ID mismatch')
         time.sleep(2)
         if socks_ip()!=ip or connected_id()!=expected:raise RuntimeError('Pinned exit changed during verification')
+        if youtube_enabled():
+            confirmed_ip,confirmed_geo=probe()
+            if confirmed_ip!=ip or geo_reason(confirmed_geo,region,strict):raise RuntimeError('YouTube GeoIP changed during PIN verification')
         if (read_json(CONFIG,{}) or {}).get('TargetServerEntry')!=candidate['encoded']:
             raise RuntimeError('Configured target changed during verification')
         atomic_json(STATE,{'region':region,'ip':ip,'google_region':geo,'gemini':verdict,
@@ -433,6 +535,7 @@ def auto_pin_current(region,gemini=False,mb=0,strict=False,wait=None):
             'adopted_unpinned':False,'pin_prepared':False,
             'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
     except Exception as exc:
+        youtube_report('UNKNOWN' if isinstance(exc,GoogleGeoUnknown) else 'DEGRADED',detail='Initial PIN deferred: '+str(exc))
         if changed:
             atomic_json(CONFIG,cfg);atomic_json(STATE,state)
             try:docker_restart(wait)
@@ -447,6 +550,7 @@ def auto_pin_current(region,gemini=False,mb=0,strict=False,wait=None):
     retry_path.unlink(missing_ok=True)
     try:remember_pin(candidate,region)
     except Exception as exc:log(f'PIN verified; reserve update deferred: {type(exc).__name__}')
+    youtube_observation(ip,geo,verdict,speed,pin=True,diag=expected)
     log(f'INITIAL PIN VERIFIED: exit={ip} Google={geo} Gemini={verdict} ID={expected}; initial exit={initial_ip}')
     return True
 
@@ -466,12 +570,14 @@ def verify_pin_current(region,gemini=False,mb=0,strict=False):
         return False
     ip,geo,verdict,speed,reason=evaluate_exit(region,gemini,mb,strict)
     diag=connected_id()
-    if ip==state['ip'] and not reason and not speed_reason(speed) and diag==state.get('diagnostic_id'):
+    if ip==state['ip'] and not reason and not geo_reason(geo,region,strict) and not speed_reason(speed) and diag==state.get('diagnostic_id'):
+        youtube_observation(ip,geo,verdict,speed,pin=True,diag=diag)
         log(f'Existing pin healthy: {ip}, {geo}, server={diag}')
         return True
     return False
 
 def search(region,wait,delay,gemini=False,mb=0,strict=False):
+    youtube_report('SEARCHING',detail='Searching for Google GeoIP RU')
     log(f'Server rotation started: {region or "AUTO"}; unlimited cycles')
     # A CLI region override must take effect before accepting the current exit.
     if (read_json(CONFIG,{}) or {}).get('EgressRegion','')!=region:
@@ -529,17 +635,20 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
                 # Recheck IP/geo, without an unnecessary second Gemini request.
                 time.sleep(5)
                 second,geo2=probe()
-                if second!=first or geo2 in POLICY.get('deny_regions',['RU']) or (strict and region and geo2!=region) or connected_id()!=expected:
+                if second!=first or geo_reason(geo2,region,strict) or connected_id()!=expected:
                     raise RuntimeError(f'Pin verification unstable: {second} Google={geo2}')
                 atomic_json(STATE,{'ip':first,'google_region':geo2,'region':region,'diagnostic_id':expected,
                                    'server_ip':server,'gemini':verdict,'speed_kib_s':speed,
                                    'adopted_unpinned':False,'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()})
                 remember_pin(candidate,region)
+                youtube_observation(first,geo2,verdict,speed,pin=True,diag=expected)
                 log(f'PIN VERIFIED: exit={first} Google={geo2} Gemini={verdict} server={server} ID={expected}')
                 return True
             except Exception as exc:
+                youtube_report('UNKNOWN' if isinstance(exc,GoogleGeoUnknown) else 'DEGRADED',detail=str(exc))
                 log(f'Server {server} failed: {exc}')
-            time.sleep(delay)
+            finally:
+                time.sleep(delay)
         log('All candidates exhausted. Refreshing discovery and repeating in 60s...')
         clear_target(region)
         try:docker_restart(wait)
@@ -549,7 +658,8 @@ def search(region,wait,delay,gemini=False,mb=0,strict=False):
         seen_exits.clear()
 
 def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
-    log(f'Monitor v4.2: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
+    log(f'Monitor v4.3: region={region or "AUTO"} interval={interval}s Gemini={gemini} speedMB={mb}')
+    youtube_report('UNKNOWN',detail='Waiting for startup verification')
     failures=0;slow_count=0;slow_identity=None
     try:wait_ready(wait)
     except Exception as exc:log(f'Startup readiness pending: {exc}')
@@ -561,6 +671,7 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
             state=read_json(STATE,{}) or {}
             config=read_json(CONFIG,{}) or {}
             diag=connected_id()
+            youtube_observation(ip,geo,verdict,speed,reason,pin=bool(config.get('TargetServerEntry') and not state.get('adopted_unpinned',True) and not state.get('pin_prepared') and diag==state.get('diagnostic_id') and ip==state.get('ip')),diag=diag)
             identity=(ip,diag,started_at())
             if identity!=slow_identity:slow_count=0;slow_identity=identity
             slow=speed_reason(speed)
@@ -613,6 +724,10 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
                 log(f'Healthy exit unchanged: {ip} Google={geo} Gemini={verdict}; '
                     + ('adopted (not pinned)' if state.get('adopted_unpinned') else 'pinned'))
         except Exception as exc:
+            youtube_report('UNKNOWN' if isinstance(exc,GoogleGeoUnknown) else 'DEGRADED',detail=str(exc))
+            if youtube_enabled() and isinstance(exc,GoogleGeoUnknown):
+                log('YouTube GeoIP UNKNOWN; retrying without accepting or restarting the server')
+                failures=0;time.sleep(min(interval,30));continue
             slow_count=0
             failures+=1
             # An outage must not postpone retries for a full hourly health interval.
@@ -641,6 +756,7 @@ def monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=
 
 def pool_monitor(region,interval,wait,delay,gemini=False,mb=0,strict=False,threshold=3):
     """Check sampled exits of a multi-tunnel pool; no single-IP PIN claim is made."""
+    if youtube_enabled():raise ValueError('YouTube mode requires a single tunnel for verified PIN')
     slow_count=0;failures=0
     log(f'Multi-tunnel monitor: {POLICY.get("tunnel_pool")} tunnels; PIN disabled')
     while True:
@@ -715,10 +831,12 @@ def uninstall(purge_deps=False):
         print(f'Removed instance {INSTANCE}; backups under /var/backups/psiphon-autopin are retained')
 
 def main():
-    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v4.2')
-    ap.add_argument('command',choices=['menu','check','search','monitor','status','refresh-cache','prepare-pin','set-region','set-pool','region','pool','rotate','start','stop','restart','logs','speed','uninstall','xray'])
+    ap=argparse.ArgumentParser(description='Psiphon Auto-Pin v4.3')
+    ap.add_argument('command',choices=['menu','check','search','monitor','status','refresh-cache','prepare-pin','set-region','set-pool','region','pool','rotate','start','stop','restart','logs','speed','uninstall','xray','xray-routing','update'])
     ap.add_argument('value',nargs='?')
     ap.add_argument('--instance',type=int,default=1)
+    ap.add_argument('--youtube-instance',type=int,default=1)
+    ap.add_argument('--gemini-instance',type=int,default=2)
     ap.add_argument('--purge-deps',action='store_true',help='With uninstall: remove only Docker/Go installed by Auto-Pin and no longer used')
     ap.add_argument('--region-pool',default=None)
     ap.add_argument('--deny-regions',default=None)
@@ -743,8 +861,8 @@ def main():
     force_rotate=(args.command=='rotate')
     if not 1<=args.instance<=99:ap.error('instance must be 1..99')
     if args.instance!=1:configure_instance(args.instance)
-    if args.command=='menu':
-        return subprocess.call([sys.executable,str(BASE/'autopin_menu.py'),'--instance',str(args.instance)])
+    if args.command in ('menu','update'):
+        return subprocess.call([sys.executable,str(BASE/'autopin_menu.py'),'--instance',str(args.instance),*(['--update'] if args.command=='update' else [])])
     if args.command in ('region','pool'):
         if args.value is None:ap.error('region/pool requires a value')
         if args.command=='region':args.region=args.value;args.command='set-region'
@@ -756,6 +874,7 @@ def main():
         if getattr(args,key) is None:setattr(args,key,int(settings.get(key,default)))
     global POLICY
     POLICY=dict(settings)
+    if type(POLICY.get('youtube_mode',False)) is not bool:ap.error('youtube_mode must be boolean')
     POLICY.update(interval=args.interval,wait=args.wait)
     for key,value in [('region_pool',args.region_pool),('deny_regions',args.deny_regions)]:
         if value is not None:
@@ -784,8 +903,14 @@ def main():
     if region and not re.fullmatch('[A-Z]{2}',region):ap.error('invalid country')
     if args.interval<60 or args.wait<20 or args.delay<2:ap.error('interval>=60 wait>=20 delay>=2')
     if not 0<=args.probe_mb<=10 or not 2<=args.fail_threshold<=20:ap.error('probe-mb 0..10, fail-threshold 2..20')
+    if args.command=='xray-routing':
+        print(json.dumps(xray_routing(args.youtube_instance,args.gemini_instance),indent=2));return 0
+    if args.command not in ('status','logs','uninstall','stop','xray') and youtube_enabled():
+        if args.gemini_check:ap.error('YouTube and Gemini require separate instances; use --no-gemini-check on the YouTube instance')
+        if int(settings.get('tunnel_pool',1))!=1:ap.error('YouTube requires --tunnel-pool 1')
+        if not ipaddress.ip_address(bind).is_loopback:ap.error('YouTube requires loopback binding')
     if args.command=='status':
-        print(json.dumps({'instance':INSTANCE,'region_pool':POLICY.get('region_pool',[]),'min_speed_kib':POLICY.get('min_speed_kib',0),'slow_threshold':POLICY.get('slow_threshold',2),'deny_regions':POLICY.get('deny_regions',['RU']),'impersonate':POLICY.get('impersonate',False),'backend':backend(),'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
+        print(json.dumps({'instance':INSTANCE,'youtube_mode':youtube_enabled(),'youtube':youtube_status(POLICY),'region_pool':POLICY.get('region_pool',[]),'min_speed_kib':POLICY.get('min_speed_kib',0),'slow_threshold':POLICY.get('slow_threshold',2),'deny_regions':POLICY.get('deny_regions',['RU']),'impersonate':POLICY.get('impersonate',False),'backend':backend(),'region':region,'state':read_json(STATE,{}) or {},'config':str(CONFIG),'proxy':f'socks5h://{PROXY}','gemini_check':args.gemini_check,'probe_mb':args.probe_mb,'strict_region':args.strict_region,'fail_threshold':args.fail_threshold},indent=2));return 0
     if args.command=='xray':
         print(json.dumps({'tag':'psiphon-out'+('' if INSTANCE==1 else f'-{INSTANCE}'),'protocol':'socks','settings':{'servers':[{'address':bind,'port':port}]}},indent=2));return 0
     if args.command=='uninstall':uninstall(args.purge_deps);return 0
@@ -798,7 +923,11 @@ def main():
         if args.command!='stop':run(['systemctl','start',monitor_unit()])
         return 0
     if args.command=='check':
-        _,_,_,speed,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
+        try:
+            ip,geo,verdict,speed,reason=evaluate_exit(region,args.gemini_check,args.probe_mb,args.strict_region)
+            youtube_observation(ip,geo,verdict,speed,reason)
+        except Exception as exc:
+            youtube_report('UNKNOWN' if isinstance(exc,GoogleGeoUnknown) else 'DEGRADED',detail=str(exc));raise
         return 2 if reason or speed_reason(speed) else 0
     DATA.mkdir(parents=True,exist_ok=True)
     resume_monitor=False

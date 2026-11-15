@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Interactive setup for Forcus Auto-Pin. CLI flags remain the source of truth."""
 import argparse
+import base64
+import hashlib
+import urllib.request
 import copy
 import datetime as dt
 from dataclasses import dataclass
@@ -10,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import socket
 from pathlib import Path
 import subprocess
 import sys
@@ -17,7 +21,7 @@ import tempfile
 import time
 import unicodedata
 
-VERSION='4.2.0'
+VERSION='4.3.0'
 ROOT=Path('/')
 
 @dataclass(frozen=True)
@@ -50,8 +54,9 @@ FIELDS=(
     Field('delay','Пауза между попытками поиска, секунд','int','Минимум 2.',2,2147483647),
     Field('impersonate','TLS-профиль браузера для Gemini','bool','Используется при проверке Gemini. Браузерный профиль загружается с проверкой SHA256.'),
     Field('backend','Вариант запуска','choice','auto сохраняет/определяет текущий вариант; новая установка использует vps-psiphon.',choices=('auto','vps-psiphon','console')),
+    Field('youtube_mode','YouTube Mode','bool','Ищет Google GeoIP = RU через SOCKS5h и проверяет PIN. Это не проверка отсутствия рекламы. Для Gemini нужен другой экземпляр; один туннель, loopback.'),
 )
-EASY_KEYS=('region','connection_type','gemini_check','port','interval')
+EASY_KEYS=('region','connection_type','gemini_check','port','interval','youtube_mode')
 TRUE={'1','y','yes','да','д','true','on'}
 FALSE={'0','n','no','нет','н','false','off'}
 
@@ -74,7 +79,7 @@ def defaults(instance=1):
         port=40000+2*(instance-1),publish_http=True,bind='127.0.0.1',region_pool=[],tunnel_pool=1,
         deny_regions=['RU','BY','IR','SY','CU','KP','CN','VE'],strict_region=False,
         min_speed_kib=800,probe_mb=4,slow_threshold=2,fail_threshold=3,interval=300,
-        wait=75,delay=12,impersonate=False,backend='auto',menu_mode='easy')
+        wait=75,delay=12,impersonate=False,backend='auto',menu_mode='easy',youtube_mode=False)
 
 def country_list(text):
     values=str(text).replace(',',' ').upper().split()
@@ -130,6 +135,10 @@ def validate(config):
             if not isinstance(value,list):raise ValueError(field.label+': нужен список')
             country_list(' '.join(value))
         else:parse_field(field,'AUTO' if field.kind=='region' and value=='' else str(value))
+    if config['youtube_mode']:
+        if config['gemini_check']:raise ValueError('YouTube и Gemini требуют двух независимых экземпляров')
+        if config['tunnel_pool']!=1:raise ValueError('YouTube Mode требует один туннель для проверяемого PIN')
+        if not ipaddress.ip_address(config['bind']).is_loopback:raise ValueError('YouTube Mode требует loopback')
     if config.get('menu_mode') not in ('easy','advanced'):raise ValueError('Неизвестный режим меню')
     if config['region_pool'] and config['region'] not in config['region_pool']:
         raise ValueError('Текущая страна должна входить в пул стран; очистите пул или выберите страну из него')
@@ -154,9 +163,61 @@ def discover():
         if p['manager'].is_file() or (p['data']/'settings.json').is_file():found.append(n)
     return found
 
+UPDATE_REPO='https://api.github.com/repos/Forcus356/Psiphon-Auto-Pin-Manager'
+
+def version_key(value):
+    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+',value):raise ValueError('Некорректная версия')
+    return tuple(map(int,value.split('.')))
+
+def installed_version(instance):
+    try:
+        text=(paths(instance)['app']/'autopin_menu.py').read_text()
+        found=re.search(r"^VERSION='([0-9]+\.[0-9]+\.[0-9]+)'$",text,re.M)
+        return found.group(1) if found else VERSION
+    except OSError:return VERSION
+
+class UpdateRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,req,fp,code,msg,headers,newurl):
+        if not newurl.startswith(UPDATE_REPO+'/'):
+            raise ValueError('Неожиданный адрес перенаправления GitHub')
+        return super().redirect_request(req,fp,code,msg,headers,newurl)
+
+def update_json(url):
+    if not url.startswith(UPDATE_REPO+'/'):raise ValueError('Недопустимый источник обновления')
+    request=urllib.request.Request(url,headers={'Accept':'application/vnd.github+json','User-Agent':'Forcus-Auto-Pin-Updater','X-GitHub-Api-Version':'2022-11-28'})
+    with urllib.request.build_opener(UpdateRedirects()).open(request,timeout=30) as response:
+        data=response.read(2*1024*1024+1)
+    if len(data)>2*1024*1024:raise ValueError('Ответ GitHub превышает допустимый размер')
+    obj=json.loads(data)
+    if not isinstance(obj,dict):raise ValueError('Некорректный ответ GitHub')
+    return obj
+
+def fetch_update(destination):
+    """Resolve once, verify the immutable Git blob, then syntax-check privately."""
+    commit=update_json(UPDATE_REPO+'/commits/main').get('sha','')
+    if not isinstance(commit,str) or not re.fullmatch('[0-9a-f]{40}',commit):raise ValueError('GitHub не вернул корректный коммит')
+    obj=update_json(UPDATE_REPO+'/contents/install_psiphon_autopin.sh?ref='+commit)
+    if obj.get('type')!='file' or obj.get('path')!='install_psiphon_autopin.sh' or obj.get('encoding')!='base64':
+        raise ValueError('Неожиданный файл обновления')
+    raw=base64.b64decode(str(obj.get('content','')).replace('\n',''),validate=True)
+    if not raw or len(raw)>1024*1024:raise ValueError('Некорректный размер установщика')
+    digest=hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+    if digest!=obj.get('sha'):raise ValueError('Git blob checksum mismatch; update rejected')
+    source=raw.decode('utf-8')
+    found=re.search(r'^# Forcus Psiphon Auto-Pin Manager v([0-9]+\.[0-9]+\.[0-9]+)$',source,re.M)
+    menu_version=re.search(r"^VERSION='([0-9]+\.[0-9]+\.[0-9]+)'$",source,re.M)
+    if not found or not menu_version or found.group(1)!=menu_version.group(1) or 'autopin_install_main() {' not in source or '\0' in source:
+        raise ValueError('Не распознан согласованный установщик Forcus Auto-Pin')
+    destination=Path(destination)
+    with destination.open('xb') as output:
+        os.chmod(destination,0o600);output.write(raw);output.flush();os.fsync(output.fileno())
+    result=subprocess.run(['bash','-n',str(destination)],capture_output=True,text=True,timeout=20)
+    if result.returncode:raise ValueError('Ошибка синтаксиса установщика: '+safe_text(result.stderr[-200:]))
+    return {'version':found.group(1),'commit':commit,'blob_sha1':digest,'sha256':hashlib.sha256(raw).hexdigest(),'path':str(destination)}
+
 def installer_for(instance,fallback=None):
-    candidates=[paths(instance)['app']/'install_psiphon_autopin.sh']
-    if fallback:candidates.append(Path(fallback))
+    candidates=[Path(fallback)] if fallback else []
+    candidates.append(paths(instance)['app']/'install_psiphon_autopin.sh')
     candidates.extend(paths(n)['app']/'install_psiphon_autopin.sh' for n in discover())
     for path in candidates:
         if path.is_file():return path
@@ -175,7 +236,7 @@ def build_args(config):
     args.extend(['--deny-regions',' '.join(config['deny_regions'])])
     for key,on,off in [('gemini_check','--gemini-check','--no-gemini-check'),
         ('publish_http','--http','--no-http'),('strict_region','--strict-region','--no-strict-region'),
-        ('impersonate','--impersonate','--no-impersonate')]:
+        ('impersonate','--impersonate','--no-impersonate'),('youtube_mode','--youtube-mode','--no-youtube-mode')]:
         args.append(on if config[key] else off)
     return args
 
@@ -192,6 +253,9 @@ def atomic_json(path,value):
         with tempfile.NamedTemporaryFile('w',dir=path.parent,delete=False) as f:
             temp=f.name;json.dump(value,f,ensure_ascii=False,indent=2);f.write('\n');f.flush();os.fsync(f.fileno())
         os.chmod(temp,0o600);os.replace(temp,path)
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
     finally:
         if temp and Path(temp).exists():Path(temp).unlink()
 
@@ -284,6 +348,10 @@ def runtime_status(instance,backend):
             p=subprocess.run(['docker','inspect','-f','{{.State.Running}}','vps-psiphon'+suffix],capture_output=True,text=True,timeout=2)
             status['tunnel']['state']='active' if p.returncode==0 and p.stdout.strip()=='true' else 'inactive' if p.returncode==0 else 'not-found'
         except (OSError,subprocess.TimeoutExpired):pass
+    try:
+        p=subprocess.run(['docker','inspect','-f','{{.State.StartedAt}}','vps-psiphon'+suffix],capture_output=True,text=True,timeout=2)
+        status['tunnel']['started_at']=p.stdout.strip() if p.returncode==0 else None
+    except (OSError,subprocess.TimeoutExpired):status['tunnel']['started_at']=None
     return status
 
 def read_state(instance):
@@ -302,9 +370,9 @@ def autostart_label(value):
 
 class Menu:
     def __init__(self,terminal,instance=1,installer=None,emit_args=None):
-        self.terminal=terminal;self.instance=instance;self.installer=installer;self.emit_args=emit_args
+        self.terminal=terminal;self.instance=instance;self.installer=installer or Path(__file__).with_name('install_psiphon_autopin.sh');self.emit_args=emit_args
         self.config=load_config(instance)
-        self.style=ConsoleStyle(terminal);self._status_cache=None
+        self.style=ConsoleStyle(terminal);self._status_cache=None;self._speed_edited=False
     def say(self,text=''):print(text,file=self.terminal,flush=True)
     def ask(self,prompt):
         while True:
@@ -326,6 +394,12 @@ class Menu:
                 self._status_cache=(key,time.monotonic(),runtime_status(self.instance,saved['backend']))
             status=self._status_cache[2]
         else:status={name:{'state':'not-found','autostart':'unknown'} for name in ('tunnel','monitor')}
+        fresh=False
+        try:
+            last=dt.datetime.fromisoformat(state['verified_at'].replace('Z','+00:00'))
+            began=dt.datetime.fromisoformat(status['tunnel']['started_at'].replace('Z','+00:00'))
+            fresh=status['tunnel']['state']=='active' and last>=began
+        except (KeyError,ValueError,TypeError,AttributeError):pass
         tunnel,tone=status_label(status['tunnel']['state']);monitor,monitor_tone=status_label(status['monitor']['state'])
         combined='green' if tone==monitor_tone=='green' else 'red' if 'red' in (tone,monitor_tone) else 'yellow'
         self.say(self.style.info('Туннель: '+tunnel+'  ·  Монитор: '+monitor,combined))
@@ -333,7 +407,7 @@ class Menu:
             auto='монитор '+autostart_label(status['monitor']['autostart'])
             if saved['backend']!='console':auto='туннель '+autostart_label(status['tunnel']['autostart'])+' / '+auto
             self.say(self.style.info('Автозапуск: '+auto))
-        mode='пул, задано '+str(saved['tunnel_pool']) if saved['tunnel_pool']>1 else 'PIN подготовлен' if state.get('pin_prepared') else 'PIN закреплён' if state.get('diagnostic_id') and state.get('adopted_unpinned') is False else 'один туннель'
+        mode='пул, задано '+str(saved['tunnel_pool']) if saved['tunnel_pool']>1 else 'PIN подготовлен' if state.get('pin_prepared') else 'PIN закреплён' if fresh and state.get('diagnostic_id') and state.get('adopted_unpinned') is False else 'проверка IP' if installed else 'один туннель'
         self.say(self.style.info('Регион: '+(saved['region'] or 'AUTO')+'  ·  Режим: '+mode))
         endpoint=saved['bind']+':'+str(saved['port'])
         self.say(self.style.info('SOCKS5: '+endpoint+'  ·  HTTP: '+(str(saved['port']+1) if saved['publish_http'] else 'выключен')))
@@ -346,19 +420,41 @@ class Menu:
             try:verified=dt.datetime.fromisoformat(verified.replace('Z','+00:00')).strftime('%d.%m.%Y %H:%M:%S %Z').strip()
             except ValueError:pass
             self.say(self.style.info('Последняя проверка: '+verified))
+        yt_path=paths(self.instance)['data']/'youtube-status.json'
+        yt={}
+        if saved['youtube_mode']:
+            try:yt=json.loads(yt_path.read_text())
+            except (OSError,ValueError):pass
+            try:
+                age=(dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(yt['checked_at'])).total_seconds()
+                boot=located('/proc/sys/kernel/random/boot_id').read_text().strip()
+                if not 0<=age<=max(600,2*saved['interval']) or yt.get('boot_id')!=boot or (yt.get('status') in ('RU VERIFIED','PIN VERIFIED') and yt.get('container_started_at')!=status['tunnel'].get('started_at')):yt['status']='UNKNOWN'
+            except (KeyError,ValueError,TypeError,OSError):yt['status']='UNKNOWN'
+        label=yt.get('status','UNKNOWN') if saved['youtube_mode'] else 'DISABLED'
+        self.say(self.style.info('YouTube Mode: '+label,'green' if label in ('RU VERIFIED','PIN VERIFIED') else 'yellow' if saved['youtube_mode'] else 'normal'))
+        if saved['youtube_mode']:
+            self.say(self.style.info('Последний YouTube IP: '+str(yt.get('ip') or 'нет данных')+' · Google: '+str(yt.get('google_region') or 'UNKNOWN')))
+            self.say(self.style.info('ID: '+str(yt.get('diagnostic_id') or 'нет данных')+' · Скорость: '+str(yt.get('speed_kib_s') if yt.get('speed_kib_s') is not None else 'нет данных')+' KiB/s'))
+            self.say(self.style.info('Последняя успешная RU-проверка: '+str(yt.get('last_success_at') or 'нет данных')))
         self.say(self.style.info('Watchdog: интервал '+watchdog_period(saved['interval'])))
         output='SOCKS5' if saved['connection_type']=='socks5' else 'Xray JSON'
-        self.say(self.style.info('Скрипт: v'+VERSION+'  ·  Формат: '+output,'cyan'))
+        current=installed_version(self.instance) if installed else VERSION
+        ui='' if current==VERSION else ' · Меню: v'+VERSION
+        self.say(self.style.info('Скрипт: v'+current+ui+'  ·  Формат: '+output,'cyan'))
         dirty=any(self.config.get(f.key)!=saved.get(f.key) for f in FIELDS)
+        if installed and not fresh:
+            waiting=status['monitor']['state'] in ('active','activating')
+            self.say(self.style.info('Проверка / поиск IP выполняется; результат ещё не подтверждён.' if waiting else 'Нет подтверждённого результата для текущего запуска.','yellow'))
         if dirty:self.say(self.style.info('Есть изменения, ещё не применены.','yellow'))
         elif not installed:self.say(self.style.info('Экземпляр ещё не установлен. Выберите настройки.','yellow'))
         self.say()
     def edit(self,mode):
         self.config['menu_mode']=mode
-        fields=[f for f in FIELDS if mode=='advanced' or f.key in EASY_KEYS]
+        by_key={field.key:field for field in FIELDS}
         while True:
+            fields=list(FIELDS) if mode=='advanced' else [by_key[key] for key in EASY_KEYS]+([by_key['min_speed_kib']] if self.config['youtube_mode'] else [])
             groups=[]
-            headings=({0:'ОСНОВНОЕ',4:'WATCHDOG'} if mode=='easy' else {0:'ОСНОВНОЕ',4:'СЕТЬ',6:'СТРАНЫ И ТУННЕЛИ',10:'СКОРОСТЬ',13:'МОНИТОРИНГ',17:'СОВМЕСТИМОСТЬ'})
+            headings=({0:'ОСНОВНОЕ',4:'WATCHDOG',5:'YOUTUBE',6:'СКОРОСТЬ ВИДЕО'} if mode=='easy' else {0:'ОСНОВНОЕ',4:'СЕТЬ',6:'СТРАНЫ И ТУННЕЛИ',10:'СКОРОСТЬ',13:'МОНИТОРИНГ',17:'СОВМЕСТИМОСТЬ',19:'YOUTUBE'})
             for index,field in enumerate(fields):
                 if index in headings:groups.append((headings[index],[]))
                 groups[-1][1].append(f'{index+1:2}. {field.label}: {display(field,self.config[field.key])}')
@@ -377,12 +473,60 @@ class Menu:
                 if field.choices:self.say(' / '.join(f'{n}. {v}' for n,v in enumerate(field.choices,1)))
                 text=self.ask(f'{field.label} [{display(field,self.config[field.key])}], Enter — оставить: ')
                 if text:
-                    value=parse_field(field,text);self.config[field.key]=value
+                    value=parse_field(field,text)
+                    if field.key=='min_speed_kib':self._speed_edited=True
+                    if field.key in ('youtube_mode','gemini_check') and value:
+                        if not self.enable_mode(field.key):continue
+                    else:self.config[field.key]=value
                     if field.key=='region' and self.config['region_pool'] and value not in self.config['region_pool']:
                         self.config['region_pool']=[];self.say('Пул стран очищен: новая страна вне прежнего пула.')
                     if field.key=='region_pool' and value and self.config['region'] not in value:
                         self.config['region']=value[0];self.say('Выбрана первая страна из пула: '+value[0])
             except (ValueError,TypeError) as exc:self.say('Ошибка: '+(str(exc) or 'выберите номер из меню'))
+    def enable_mode(self,key):
+        other='gemini_check' if key=='youtube_mode' else 'youtube_mode'
+        label='YouTube' if key=='youtube_mode' else 'Gemini'
+        if self.config[other]:
+            self.say('YouTube (Google RU) и Gemini работают на разных экземплярах и SOCKS-портах.')
+            self.say('1. Настроить отдельный экземпляр для '+label+' (текущий не изменится)')
+            self.say('2. Использовать текущий, отключив только его другой режим')
+            self.say('0. Отмена')
+            choice=self.ask('Выбор [Enter — 1]: ') or '1'
+            if choice=='1':
+                occupied=set(discover())|{self.instance};ports=set()
+                for number in discover():
+                    cfg=load_config(number);ports.add(cfg['port'])
+                    if cfg['publish_http']:ports.add(cfg['port']+1)
+                candidate=None
+                for number in range(1,100):
+                    if number in occupied:continue
+                    port=40000+2*(number-1)
+                    if {port,port+1}&ports:continue
+                    sockets=[]
+                    try:
+                        for value in (port,port+1):
+                            sock=socket.socket();sockets.append(sock);sock.bind(('127.0.0.1',value))
+                    except OSError:continue
+                    finally:
+                        for sock in sockets:sock.close()
+                    candidate=number;break
+                if candidate is None:raise ValueError('Нет свободного экземпляра и пары портов')
+                previous=self.instance;selected_mode=self.config['menu_mode'];self.instance=candidate;self.config=defaults(candidate)
+                self.config.update(youtube_mode=(key=='youtube_mode'),gemini_check=(key=='gemini_check'),region='' if key=='youtube_mode' else 'NL',min_speed_kib=1500 if key=='youtube_mode' else 800,menu_mode=selected_mode)
+                self._status_cache=None;self._speed_edited=False
+                self.say(f'Настраивается новый экземпляр {candidate}, SOCKS {self.config["port"]}. Экземпляр {previous} не изменён. Примените настройки через y.')
+                return True
+            if choice!='2':return False
+            if not self.confirm('Отключить другой режим только у текущего экземпляра?'):return False
+        if key=='youtube_mode' and (self.config['tunnel_pool']!=1 or self.config['bind']!='127.0.0.1'):
+            if not self.confirm('YouTube требует 1 туннель и 127.0.0.1. Установить эти значения?'):return False
+            self.config.update(tunnel_pool=1,bind='127.0.0.1')
+        if key=='youtube_mode' and not (paths(self.instance)['data']/'settings.json').exists() and not self._speed_edited:
+            self.config['min_speed_kib']=1500
+        self.config[key]=True;self.config[other]=False
+        if key=='youtube_mode':self.say('Обязательная политика Google RU; сохранённые deny/strict параметры не удаляются. Регион Psiphon остаётся выбранным; AUTO расширяет поиск.')
+        return True
+
     def apply(self):
         try:args=build_args(self.config)
         except (ValueError,TypeError) as exc:self.say('Ошибка настроек: '+str(exc));return False
@@ -394,13 +538,46 @@ class Menu:
             return True
         try:
             installer=installer_for(self.instance,self.installer)
-            result=subprocess.run(['bash',str(installer),*args])
+            result=subprocess.run(['bash',str(installer),*args],env={**os.environ,'AUTOPIN_MENU_PARENT':'1'})
             if result.returncode:
                 self.say(f'Установщик завершился с кодом {result.returncode}; сохранение новых настроек не подтверждено. Проверьте журналы.')
                 return False
-            self.config=load_config(self.instance);self._status_cache=None
+            self.config=load_config(self.instance);self._status_cache=None;self._speed_edited=False
             self.show_connection();return True
         except (OSError,RuntimeError) as exc:self.say('Ошибка применения: '+str(exc));return False
+    def update(self):
+        if not paths(self.instance)['manager'].is_file():
+            self.say('Сначала установите этот экземпляр через Easy или Advanced.');return False
+        self.say('Получаю установщик из Forcus356/Psiphon-Auto-Pin-Manager...')
+        self.say('Будут сохранены установленные настройки выбранного экземпляра; несохранённые правки меню не применяются.')
+        try:
+            with tempfile.TemporaryDirectory(prefix='autopin-update-') as tmp:
+                info=fetch_update(Path(tmp)/'install.sh')
+                current=installed_version(self.instance)
+                if version_key(info['version'])<max(version_key(VERSION),version_key(current)):
+                    raise ValueError('На GitHub версия '+info['version']+' старее установленной. Откат запрещён; сначала опубликуйте новую версию в репозитории.')
+                self.panel('Обновление · экземпляр '+str(self.instance),[('',[
+                    'Версия: '+current+' → '+info['version'],
+                    'Коммит: '+info['commit'],
+                    'SHA-256: '+info['sha256']])])
+                if not self.confirm('Обновить этот экземпляр с сохранением настроек?'):
+                    self.say('Отменено; установщик не запускался.');return False
+                result=subprocess.run(['bash',info['path'],'--instance',str(self.instance)],env={**os.environ,'AUTOPIN_MENU_PARENT':'1'})
+                if result.returncode:
+                    self.say('Обновление не подтверждено: установщик завершился с кодом '+str(result.returncode)+'. Проверьте журнал и резервную копию на VPS.');return False
+                receipt={k:v for k,v in info.items() if k!='path'}
+                receipt['updated_at']=dt.datetime.now(dt.timezone.utc).isoformat()
+                atomic_json(paths(self.instance)['data']/'update-source.json',receipt)
+                self.say('Обновление завершено.')
+                return True
+        except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:
+            self.say('Обновление: '+safe_text(str(exc)));return False
+
+    def reopen(self):
+        self.say('Открываю главное меню обновлённого экземпляра...')
+        os.execv(sys.executable,[sys.executable,str(paths(self.instance)['app']/'autopin_menu.py'),'--instance',str(self.instance)])
+        return 0
+
     def show_connection(self):
         value=connection(self.config);self.say('\nГотово. Подключение:')
         self.say(value['uri'] if value['type']=='socks5' else json.dumps(value['outbound'],ensure_ascii=False,indent=2))
@@ -413,7 +590,7 @@ class Menu:
         try:
             value=valid_instance(self.ask('Номер экземпляра 1–99 (существующий или новый): '))
             config=load_config(value)
-            self.instance=value;self.config=config;self._status_cache=None
+            self.instance=value;self.config=config;self._status_cache=None;self._speed_edited=False
         except (ValueError,OSError) as exc:self.say('Ошибка: '+str(exc))
     def manage(self):
         manager=paths(self.instance)['manager']
@@ -458,7 +635,8 @@ class Menu:
             self.panel(f'Forcus Auto-Pin {VERSION} · экземпляр {self.instance}',[
                 ('НАСТРОЙКА',['1. Easy Mode — основные настройки','2. Advanced Mode — все настройки']),
                 ('ОБСЛУЖИВАНИЕ',['3. Управление и диагностика','4. Выбрать / создать экземпляр']),
-                ('', ['0. Выход'])])
+                ('ОБНОВЛЕНИЕ',['5. Обновить Auto-Pin (GitHub)']),
+                ('', ['r. Обновить состояние','0. Выход'])])
             self.footer()
             answer=self.ask('Выбор [Enter — '+self.config['menu_mode'].title()+']: ')
             if answer=='':answer='1' if self.config['menu_mode']=='easy' else '2'
@@ -469,6 +647,9 @@ class Menu:
             elif answer=='3':
                 if self.manage():return 0
             elif answer=='4':self.select_instance()
+            elif answer=='5':
+                if self.update():return self.reopen()
+            elif answer=='r':self._status_cache=None
             else:self.say('Выберите номер из меню.')
 
 class TerminalIO:
@@ -483,13 +664,15 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description='Forcus Auto-Pin Easy / Advanced menu')
     parser.add_argument('--instance',type=int)
     parser.add_argument('--installer',type=Path)
+    parser.add_argument('--update',action='store_true')
     parser.add_argument('--emit-args',type=Path,help=argparse.SUPPRESS)
     args=parser.parse_args(argv)
     if os.geteuid()!=0:print('Запустите меню от root: sudo auto-pin',file=sys.stderr);return 1
     try:
         instance=valid_instance(args.instance) if args.instance is not None else (discover() or [1])[0]
         with open('/dev/tty','r',encoding='utf-8',errors='replace') as reader, open('/dev/tty','w',encoding='utf-8',buffering=1) as writer:
-            return Menu(TerminalIO(reader,writer),instance,args.installer,args.emit_args).run()
+            menu=Menu(TerminalIO(reader,writer),instance,args.installer,args.emit_args)
+            return (menu.reopen() if menu.update() else 1) if args.update else menu.run()
     except (KeyboardInterrupt,EOFError):return 0
     except (ValueError,OSError,RuntimeError) as exc:print('Меню: '+str(exc),file=sys.stderr);return 1
 

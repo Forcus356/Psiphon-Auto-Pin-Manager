@@ -6,7 +6,7 @@
 
 **SOCKS5 محلی · تثبیت خودکار سرور · بررسی Google/Gemini · بازیابی**
 
-![Version](https://img.shields.io/badge/version-4.2.0-32b98b?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.3.0-32b98b?style=flat-square)
 ![Platform](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64-2496ed?style=flat-square)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
@@ -20,11 +20,15 @@
 
 [شروع سریع](#quick-start) · [امکانات](#features) · [منوی کنسول](#menu) · [مرجع فرمان‌ها](#commands) · [اتصال Xray](#xray) · [به‌روزرسانی و نگهداری](#operations) · [حذف](#uninstall) · [پرسش‌های رایج](#faq)
 
+[YouTube Mode](#youtube) · [امنیت](#security)
+
 <a id="quick-start"></a>
 
 ## شروع سریع
 
 فرمان‌ها را در Bash با کاربر root اجرا کنید. Ubuntu/Debian با معماری x86_64 و systemd پشتیبانی می‌شود؛ اینترنت و curl لازم است. نصب‌کننده Docker/Go موردنیاز را نصب می‌کند و نصب‌های موجود را حفظ می‌کند.
+
+خروجی‌گیر به Go 1.22 نیاز دارد؛ Go 1.21+ می‌تواند toolchain تازه با بررسی checksum انتخاب کند. Go قدیمی پیش از توقف سرویس رد می‌شود و نصب موجود جایگزین نمی‌شود.
 
 نصب‌کننده را دریافت و اجرا کنید. اجرای بدون آرگومان در ترمینال، منوی تنظیمات را باز می‌کند:
 
@@ -67,7 +71,13 @@ auto-pin
 
 ## منوی کنسول
 
+پس از نصب یا اعمال تعاملی، منوی اصلی auto-pin برای نمونه انتخابی خودکار باز می‌شود. اگر جست‌وجو/بررسی IP تمام نشده باشد مشخص می‌شود؛ شروع سرویس به معنی خروجی تأییدشده نیست. برای تازه‌کردن نتیجه ذخیره‌شده، بدون آزمون تازه شبکه، **r** را بزنید. اجرای غیرتعاملی معمول تمام می‌شود.
+
 **Easy:** کشور، قالب اتصال، Gemini، پورت SOCKS و دوره watchdog به دقیقه. **Advanced:** همه گزینه‌های نصب. گزینه‌های ۳ و ۴ منوی اصلی برای مدیریت و انتخاب نمونه هستند.
+
+گزینه **۶** Easy و تنظیمات Advanced شامل **YouTube Mode** هستند؛ watchdog گزینه ۵ می‌ماند. اگر Gemini روشن باشد، منو نمونه مستقل با پورت آزاد پیشنهاد می‌دهد. نمونه اصلی تغییر نمی‌کند؛ جایگزینی حالت فعلی نیازمند انتخاب و تأیید صریح است.
+
+با روشن‌بودن YouTube، گزینه **۷** Easy برای آستانه سرعت ویدیو اضافه می‌شود.
 
 Enter مقدار را نگه می‌دارد؛ `-` فهرست کشورها را پاک می‌کند. حرف لاتین `y` تنظیمات را نمایش می‌دهد و پس از تأیید `y/n` اعمال می‌کند. لغو، تنظیمات قبلی را حفظ می‌کند. اعمال ممکن است تونل انتخابی را دوباره متصل کند. Easy مقادیر پنهان Advanced را حفظ می‌کند.
 
@@ -79,6 +89,10 @@ Enter مقدار را نگه می‌دارد؛ `-` فهرست کشورها را 
 نمونه خروجی نمایشگر فعلی منو؛ نشانی‌ها و وضعیت‌های تصویر نمایشی هستند.
 
 ![پیش‌نمایش منو](docs/assets/menu-preview.png)
+
+![Easy Mode — YouTube](docs/assets/easy-mode-preview.png)
+
+[Easy Mode (.txt)](docs/assets/easy-mode-demo.txt)
 
 [پیش‌نمایش منو (.txt)](docs/assets/menu-demo.txt)
 
@@ -171,6 +185,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-M
 
 | فرمان | کاربرد |
 | --- | --- |
+| `psiphon-autopin xray-routing --youtube-instance 2 --gemini-instance 1` | خروجی مسیریابی با پورت‌های ذخیره‌شده. |
+| `psiphon-autopin update` | به‌روزرسانی از auto-pin. |
 | `auto-pin` | بازکردن منوی تنظیم و مدیریت. |
 | `auto-pin --instance 2` | بازکردن منوی نمونه ۲. |
 | `psiphon-autopin status` | نمایش تنظیمات ذخیره‌شده و آخرین نتیجه. |
@@ -205,6 +221,73 @@ psiphon-autopin set-pool --region-pool NL,DE
 </div>
 
 کد خروج `check`: **0** نتیجه پذیرفته، **2** رد سیاست از جمله سرعت کم، **1** خطای بررسی/اجرا. نتیجه پذیرفته ممکن است همچنان Gemini با وضعیت `INCONCLUSIVE` داشته باشد.
+
+<a id="youtube"></a>
+
+## YouTube Mode
+
+اختیاری و **به‌طور پیش‌فرض خاموش** است. فقط **Google GeoIP = RU** از صفحه YouTube و از مسیر SOCKS5h همین نمونه پذیرفته می‌شود. منطقه و PIN بررسی می‌شوند، نه نبود تبلیغات.
+
+YouTube به یک تونل، loopback و Gemini خاموش در همان نمونه نیاز دارد. کشور Psiphon می‌تواند AUTO یا کشور انتخابی باشد؛ خودکار به RU تغییر نمی‌کند. شرط Google RU جای پذیرش عادی deny/strict را می‌گیرد، ولی مقادیر ذخیره‌شده پاک نمی‌شوند. UNKNOWN تکرار می‌شود و پذیرفته نیست. تأخیر، حد سرعت، حافظه نهان، نامزدهای ذخیره و تأیید PIN حفظ می‌شوند.
+
+پیش‌فرض نمونه تازه YouTube برابر **1500 KiB/s ≈ 12.3 Mbps** است. مقدار ذخیره‌شده یا صریح حفظ می‌شود. **4 MiB اندازه آزمون است**، نه حداقل سرعت. با YouTube روشن، گزینه **۷** Easy آستانه سرعت ویدیو را تنظیم می‌کند؛ Advanced و --min-speed نیز در دسترس‌اند. آزمون کوتاه، کیفیت پایدار کل ویدیو را تضمین نمی‌کند.
+
+نمونه برای VPS تازه: Gemini در نمونه ۱ با پورت 40000 و YouTube در نمونه ۲ با 40002. در نصب موجود شماره و پورت آزاد انتخاب کنید و تنظیم Gemini فعال را حفظ کنید. فرمان Gemini زیر برای تنظیم اولیه است.
+
+<div dir="ltr" align="left">
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Forcus356/Psiphon-Auto-Pin-Manager/main/install_psiphon_autopin.sh -o /tmp/install_psiphon_autopin.sh
+```
+
+</div>
+
+### نمونه Gemini
+
+<div dir="ltr" align="left">
+
+```bash
+bash /tmp/install_psiphon_autopin.sh --instance 1 --region NL --gemini-check --no-youtube-mode
+```
+
+</div>
+
+### نمونه YouTube
+
+<div dir="ltr" align="left">
+
+```bash
+bash /tmp/install_psiphon_autopin.sh --instance 2 --region AUTO --youtube-mode --no-gemini-check --tunnel-pool 1
+```
+
+</div>
+
+از منو خاموش کنید یا نصب‌کننده را با --instance 2 --no-youtube-mode دوباره اجرا کنید. نمونه دیگر و مقدار فعلی Gemini تغییر نمی‌کند. نبود youtube_mode در JSON قدیمی یعنی false. مجموعه‌های ۲ تا ۳۲ تونل هنگام خاموش‌بودن YouTube همچنان پشتیبانی می‌شوند.
+
+وضعیت شامل IP دیده‌شده، کشور Google، شناسه، سرعت، PIN و زمان آخرین بررسی موفق RU است. پس از راه‌اندازی دوباره سیستم/کانتینر یا قدیمی‌شدن نتیجه، بررسی تازه لازم است.
+
+| Status | کاربرد |
+| --- | --- |
+| `DISABLED` | حالت خاموش است. |
+| `SEARCHING` | جست‌وجوی Google RU. |
+| `RU VERIFIED` | RU دیده شده؛ PIN هنوز تأیید نشده است. |
+| `PIN VERIFIED` | RU و PIN سرور انتخابی تأیید شدند. |
+| `DEGRADED` | مشکل اتصال یا سرعت. |
+| `UNKNOWN` | نتیجه معتبر فعلی GeoIP موجود نیست. |
+
+### خروجی مسیریابی با پورت‌های ذخیره‌شده
+
+<div dir="ltr" align="left">
+
+```bash
+psiphon-autopin xray-routing --youtube-instance 2 --gemini-instance 1
+```
+
+</div>
+
+outboundهای خروجی را **پس از outbound پیش‌فرض موجود** و قوانین دامنه را پیش از قوانین عمومی اضافه کنید. روی inboundهای واقعی sniffing را فعال کنید یا نام مقصد را از SOCKS/VLESS بفرستید. برای Xray در Docker از شبکه host استفاده کنید. پراکسی TCP، QUIC را منتقل نمی‌کند؛ نمونه UDP/443 را فقط برای دامنه‌های انتخابی می‌بندد تا بازگشت به TCP ممکن شود. نام‌های پنهان یا رمزگذاری‌شده همیشه شناسایی نمی‌شوند. تنظیم Xray خودکار تغییر نمی‌کند.
+
+[JSON + sniffing](docs/xray/README.md)
 
 <a id="xray"></a>
 
@@ -249,6 +332,7 @@ psiphon-autopin xray
 
 | گزینه | پیش‌فرض | کاربرد |
 | --- | --- | --- |
+| `--youtube-mode` / `--no-youtube-mode` | غیرفعال | Google RU اجباری و PIN تأییدشده یک تونل؛ با Gemini در همان نمونه سازگار نیست. |
 | `--region NL / --region AUTO / --region NL,DE` | انتخاب در منو / الزامی در نصب غیرتعاملی (NL) | کد دوحرفی کشور Psiphon، AUTO یا مجموعه جداشده با ویرگول. |
 | `--instance N` | 1 | انتخاب نمونه ۱ تا ۹۹. |
 | `--port N` | 40000 + 2 × (N−1) | پورت SOCKS از 1024 تا 65534؛ HTTP پورت بعدی است. |
@@ -265,7 +349,7 @@ psiphon-autopin xray
 | `--interval N` | 300 s | دوره معمول بررسی به ثانیه؛ حداقل ۶۰. |
 | `--wait N` | 75 s | مهلت آماده‌شدن به ثانیه؛ حداقل ۲۰. |
 | `--delay N` | 12 s | وقفه تلاش جست‌وجو به ثانیه؛ حداقل ۲. |
-| `--min-speed N` | 800 KiB/s | حداقل KiB/s؛ صفر تعویض بر اساس سرعت را خاموش می‌کند. |
+| `--min-speed N` | 800 / 1500 (YouTube) KiB/s | حداقل KiB/s؛ صفر تعویض بر اساس سرعت را خاموش می‌کند. |
 | `--probe-mb N` | 4 MiB | نمونه ۰ تا ۱۰ MiB؛ صفر با آستانه فعال، صفحه را اندازه می‌گیرد. |
 | `--slow-threshold N` | 2 | تعداد نمونه کند متوالی تا تعویض، ۲ تا ۲۰. |
 | `--fail-threshold N` | 3 | تعداد خطای متوالی تا بازیابی، ۲ تا ۲۰. |
@@ -279,6 +363,24 @@ psiphon-autopin xray
 <a id="operations"></a>
 
 ## به‌روزرسانی و نگهداری
+
+### به‌روزرسانی از auto-pin
+
+گزینه **۵ — Update Auto-Pin (GitHub)** نمونه نصب‌شده انتخابی را با حفظ تنظیمات به‌روز می‌کند. نمونه دیگر تغییر نمی‌کند؛ آن را با گزینه ۴ انتخاب کنید. main به commit ثابت تبدیل می‌شود، blob گیت و نحو Bash بررسی می‌شوند و نسخه/commit/SHA-256 پیش از تأیید نمایش داده می‌شوند. خطای شبکه یا بررسی مانع اجرای نصب‌کننده است؛ نسخه قدیمی رد می‌شود. پس از موفقیت منوی اصلی به‌روز خودکار باز می‌شود.
+
+این فرمان‌ها همان به‌روزرسانی با تأیید را باز می‌کنند. قابلیت پس از نصب اولیه این نسخه موجود است؛ ابتدا همه فایل‌های نسخه را در مخزن خود منتشر کنید.
+
+<div dir="ltr" align="left">
+
+```bash
+auto-pin --update
+psiphon-autopin update
+psiphon-autopin-2 update
+```
+
+</div>
+
+جدیدترین منوی نصب‌شده انتخاب می‌شود؛ نمونه اول قدیمی ویژگی جدید را پنهان نمی‌کند.
 
 ### به‌روزرسانی نمونه موجود
 
@@ -436,6 +538,8 @@ EgressRegion درخواست منطقه از Psiphon است؛ Google ممکن ا�
 
 | مسیر | کاربرد |
 | --- | --- |
+| `/var/lib/psiphon-autopin/youtube-status.json` | آخرین مشاهده YouTube و فراداده تازگی. |
+| `/var/lib/psiphon-autopin/update-source.json` | commit و جمع کنترلی منبع آخرین به‌روزرسانی موفق از منو. |
 | `/var/lib/psiphon-autopin/settings.json` | تنظیمات مؤثر و ترجیحات منو. |
 | `/var/lib/psiphon-autopin/state.json` | آخرین نتیجه پایش و وضعیت PIN. |
 | `/opt/vps-psiphon/config/psiphon.config` | تنظیمات خصوصی Psiphon و ورودی هدف. |
@@ -444,6 +548,14 @@ EgressRegion درخواست منطقه از Psiphon است؛ Google ممکن ا�
 | `/var/lib/psiphon-autopin/xray-outbound.json` | outbound برای Xray در صورت انتخاب این قالب. |
 | `/var/lib/psiphon-autopin-system/dependencies.json` | سابقه مالکیت Docker/Go با مجوز 0600. |
 | `/var/backups/psiphon-autopin` | نسخه‌های پشتیبان مهاجرت و بازیابی. |
+
+<a id="security"></a>
+
+## امنیت
+
+ایمیج‌های Psiphon و Debian با digest ثابت شده‌اند. ConsoleClient از commit ثابت دریافت و پیش از استفاده، حتی هنگام به‌روزرسانی، با SHA-256 بررسی می‌شود. کانتینرها UID 1000، بدون capability، ریشه فقط‌خواندنی و no-new-privileges دارند. systemd فایل و قابلیت سرویس میزبان را محدود می‌کند؛ کنترل‌کننده Docker همچنان به حقوق معادل root نیاز دارد. --bind خصوصی صریح بیرون YouTube حفظ شده است. یادداشت امنیت را ببینید.
+
+[SECURITY.md](SECURITY.md) · [SECURITY.ru_RU.md](SECURITY.ru_RU.md)
 
 <a id="development"></a>
 
